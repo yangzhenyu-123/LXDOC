@@ -1,0 +1,84 @@
+# LXDOC Docker 镜像构建与发布
+#
+# 触发：推送 v* 格式的 tag（如 v1.0.0、v1.0.0-rc1）
+# 产出：构建 backend / frontend / pdf2html 三个镜像，推送到 GHCR（公开）
+# 标签策略：
+#   - ghcr.io/<owner>/lxdoc-<name>:<tag>      （版本号，如 v1.0.0）
+#   - ghcr.io/<owner>/lxdoc-<name>:latest     （最新稳定版）
+# 权限：workflow 需 write:packages 权限推 GHCR（已在 permissions 声明）
+#
+# 说明：onlyoffice / postgres 使用官方镜像，无需构建
+#       pdf2html 的 AppImage 仅为 amd64，故本 workflow 只构建 linux/amd64
+name: Publish Docker Images
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # 允许手动触发（便于测试 CI 流程，不依赖打 tag）
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # 推送 GHCR 所需权限
+    strategy:
+      matrix:
+        # 三个需构建的镜像：name=镜像后缀，context=构建上下文，dockerfile=Dockerfile 路径
+        include:
+          - name: backend
+            context: ./server
+            dockerfile: ./docker/Dockerfile.backend
+          - name: frontend
+            context: ./web
+            dockerfile: ./docker/Dockerfile.frontend
+            # frontend 的 Dockerfile 用 COPY --from=docker 引用 docker 目录，需附加上下文
+            additional_contexts: 'docker=./docker'
+          - name: pdf2html
+            context: ./docker/pdf2html
+            dockerfile: ./docker/pdf2html/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata（镜像名与标签）
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # 镜像名：ghcr.io/<owner>/lxdoc-<name>
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/lxdoc-${{ matrix.name }}
+          tags: |
+            # 打 tag 触发：用 tag 名作标签（如 v1.0.0）
+            type=ref,event=tag
+            # 同时打 latest（仅 tag 触发时；workflow_dispatch 不打 latest 避免误覆盖）
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push（amd64）
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          # frontend 需附加 docker 上下文（COPY --from=docker ...）
+          additional-contexts: ${{ matrix.additional_contexts }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 利用 GitHub Actions 缓存加速重复构建
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

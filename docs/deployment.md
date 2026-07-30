@@ -6,8 +6,12 @@
 
 ```bash
 git clone <repo> LXDOC && cd LXDOC
+cp .env.example .env
+# 编辑 .env：必须设置 POSTGRES_PASSWORD / JWT_SECRET / ONLYOFFICE_JWT_SECRET
 docker compose up -d
 ```
+
+> **构建模式**：默认拉取 GHCR 预构建镜像（开箱即用）。如需本地构建（开发/自定义 Dockerfile），用 `docker compose up -d --build`。指定版本：`.env` 中设 `LXDOC_IMAGE_TAG=v1.0.0`。
 
 启动的服务：
 
@@ -22,6 +26,40 @@ docker compose up -d
 启动后访问 http://localhost:8080，默认管理员 `admin@lxdoc.local` / `lxdoc12345`。
 
 > OnlyOffice 镜像较大且首次需初始化字体，可能耗时 1~2 分钟。可用 `docker logs -f lxdoc-onlyoffice` 观察就绪状态。
+
+### 直接拉取镜像（无需克隆仓库）
+
+CI 自动构建的镜像托管在 GHCR（公开），可直接拉取：
+
+```bash
+docker pull ghcr.io/yangzhenyu-123/lxdoc-backend:latest
+docker pull ghcr.io/yangzhenyu-123/lxdoc-frontend:latest
+docker pull ghcr.io/yangzhenyu-123/lxdoc-pdf2html:latest
+# 指定版本：ghcr.io/yangzhenyu-123/lxdoc-backend:v1.0.0
+```
+
+镜像版本列表见 [GHCR Packages](https://github.com/yangzhenyu-123?tab=packages)。onlyoffice / postgres 使用官方镜像，无需自行拉取。
+
+## CI 自动发布
+
+仓库通过 GitHub Actions 自动构建并发布 Docker 镜像到 GHCR（[`.github/workflows/docker-publish.yml`](../.github/workflows/docker-publish.yml)）。
+
+**触发方式**：推送 `v*` 格式的 tag（如 `v1.0.0`、`v1.0.0-rc1`）自动构建 backend / frontend / pdf2html 三个镜像，打 `<tag>` 与 `latest` 标签。也可在 Actions 页面手动触发（`workflow_dispatch`，仅打 `<tag>` 不覆盖 `latest`）。
+
+**发布流程**：
+```bash
+# 1. 确认改动已合并到 main 且本地 build 通过
+# 2. 打 tag
+git tag v1.0.0
+git push origin v1.0.0
+# 3. Actions 自动构建并推 GHCR，完成后镜像可 docker pull
+```
+
+**镜像命名**：`ghcr.io/yangzhenyu-123/lxdoc-<name>:<tag>`（name = backend / frontend / pdf2html）
+
+**自定义镜像源**：在 `.env` 设置 `LXDOC_IMAGE_PREFIX` 覆盖默认前缀（如内网镜像源 `registry.internal/lxdoc`）。
+
+> 仅构建 `linux/amd64`：pdf2html 的 AppImage 仅为 amd64，arm64 需自行从源码构建（见 [PDF 版式预览](#pdf-版式预览pdf2htmlex-sidecar)）。
 
 ## 服务编排说明
 

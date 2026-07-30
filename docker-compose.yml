@@ -35,6 +35,8 @@ services:
 
   # 后端 NestJS 服务
   backend:
+    # 镜像优先：CI 发布后 docker pull 即可；本地开发用 docker compose build 覆盖
+    image: ${LXDOC_IMAGE_PREFIX:-ghcr.io/yangzhenyu-123}/lxdoc-backend:${LXDOC_IMAGE_TAG:-latest}
     build:
       context: ./server
       dockerfile: ../docker/Dockerfile.backend
@@ -124,6 +126,7 @@ services:
   # 后端通过 PDF2HTML_URL 以 HTTP 调用，PDF 原文件字节 POST 到 /convert
   # sidecar 故障仅影响 PDF「版式预览」tab，「翻页预览」「编辑文本」「转可编辑」不受影响
   pdf2html:
+    image: ${LXDOC_IMAGE_PREFIX:-ghcr.io/yangzhenyu-123}/lxdoc-pdf2html:${LXDOC_IMAGE_TAG:-latest}
     build:
       context: ./docker/pdf2html
       dockerfile: Dockerfile
@@ -142,6 +145,7 @@ services:
 
   # 前端 nginx 服务
   frontend:
+    image: ${LXDOC_IMAGE_PREFIX:-ghcr.io/yangzhenyu-123}/lxdoc-frontend:${LXDOC_IMAGE_TAG:-latest}
     build:
       context: ./web
       dockerfile: ../docker/Dockerfile.frontend
