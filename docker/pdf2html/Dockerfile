@@ -14,6 +14,8 @@ FROM debian:bookworm-slim
 
 # 系统依赖：
 # - ca-certificates / wget：下载 AppImage
+# - squashfs-tools：用 unsquashfs 直接解压 AppImage（AppImage 是 squashfs 格式），
+#   避免 AppImage runtime 自解压依赖 libfuse2 / runtime 检测（bookworm-slim 缺 FUSE）
 # - fontconfig / libfreetype6：pdf2htmlEX 渲染依赖
 # - fonts-noto-cjk：中文字体，避免中文 PDF 显示方块
 # - python3：运行 stdlib HTTP server（无需 pip 包）
@@ -21,6 +23,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         wget \
+        squashfs-tools \
         fontconfig \
         libfreetype6 \
         fonts-noto-cjk \
@@ -31,10 +34,11 @@ RUN apt-get update \
 # 可通过 --build-arg PDF2HTML_APPIMAGE_URL 覆盖（如内网镜像源）
 ARG PDF2HTML_APPIMAGE_URL=https://github.com/pdf2htmlEX/pdf2htmlEX/releases/download/v0.18.8.rc1/pdf2htmlEX-0.18.8.rc1-master-20200630-Ubuntu-focal-x86_64.AppImage
 RUN wget -q -O /opt/pdf2htmlEX.AppImage "${PDF2HTML_APPIMAGE_URL}" \
-    && chmod +x /opt/pdf2htmlEX.AppImage \
-    # 预解压 AppImage 到 /opt/pdf2htmlex，运行时直接调 AppRun（无需 FUSE）
-    && cd /opt && ./pdf2htmlEX.AppImage --appimage-extract \
-    && mv squashfs-root pdf2htmlex \
+    # 用 unsquashfs 直接解压 AppImage（squashfs 格式），无需 FUSE / AppImage runtime
+    # -f 强制覆盖，-no-progress 静默；解压到 /opt/pdf2htmlex
+    && unsquashfs -f -no-progress -d /opt/pdf2htmlex /opt/pdf2htmlEX.AppImage \
+    # 删除 AppImage 原文件减小镜像体积
+    && rm /opt/pdf2htmlEX.AppImage \
     # 冒烟测试：确认 AppRun 可执行（--version 输出版本号即可）
     && /opt/pdf2htmlex/AppRun --version
 
