@@ -2,10 +2,15 @@ import { createParamDecorator, ExecutionContext } from '@nestjs/common';
 
 /**
  * 鉴权后挂到 req.user 上的用户信息结构
+ * - organizationId: 用户所属组织节点 id（全局 admin 为 null）
+ * - orgPath: 用户所属组织节点的物化路径（全局 admin 为 null）
+ * 编辑授权（manageableOrgPaths）由 AccessControlService 请求时即时查询，不入 JWT
  */
 export interface AuthUser {
   id: string;
   role: string;
+  organizationId: string | null;
+  orgPath: string | null;
 }
 
 /**

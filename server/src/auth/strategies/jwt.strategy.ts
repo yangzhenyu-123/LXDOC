@@ -21,11 +21,16 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   }
 
   async validate(payload: any) {
-    // payload: { sub, role, type? }
+    // payload: { sub, role, organizationId?, orgPath?, type? }
     // refresh token 不能用于访问业务 API
     if (payload.type === 'refresh') {
       throw new UnauthorizedException('不能使用 refresh token 访问 API');
     }
-    return { id: payload.sub, role: payload.role };
+    return {
+      id: payload.sub,
+      role: payload.role,
+      organizationId: payload.organizationId ?? null,
+      orgPath: payload.orgPath ?? null,
+    };
   }
 }

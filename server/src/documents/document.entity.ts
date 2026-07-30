@@ -19,6 +19,32 @@ export enum DocumentFormat {
 }
 
 /**
+ * 文档归属类型
+ * - personal: 个人私有空间，ownerId = 创建者 user id
+ * - group: 归属某组，ownerId = organization id
+ * - department: 归属某部门，ownerId = organization id
+ */
+export enum DocumentOwnerType {
+  PERSONAL = 'personal',
+  GROUP = 'group',
+  DEPARTMENT = 'department',
+}
+
+/**
+ * 正文来源
+ * - manual: 用户手写/编辑的 md/txt
+ * - pandoc: docx 经 pandoc 抽取的索引文本（仅检索，docx 走 OnlyOffice 编辑）
+ * - pdf_text: pdf-parse 提取的全文
+ * - onlyoffice: docx 由 OnlyOffice 回写标记
+ */
+export enum ContentSource {
+  MANUAL = 'manual',
+  PANDOC = 'pandoc',
+  PDF_TEXT = 'pdf_text',
+  ONLYOFFICE = 'onlyoffice',
+}
+
+/**
  * 文档实体
  * title/content 上加普通 B-tree 索引（用于精确查询）
  * GIN trigram 索引在 AppModule.onApplicationBootstrap 中通过原始 SQL 创建
@@ -65,6 +91,29 @@ export class Document {
   @Index()
   @Column({ name: 'created_by', type: 'uuid', nullable: true })
   createdBy: string | null;
+
+  // 文档归属类型与归属 id：
+  // personal → ownerId = 创建者 user id；group/department → ownerId = organization id
+  @Index()
+  @Column({
+    name: 'owner_type',
+    type: 'enum',
+    enum: DocumentOwnerType,
+    default: DocumentOwnerType.PERSONAL,
+  })
+  ownerType: DocumentOwnerType;
+
+  @Column({ name: 'owner_id', type: 'uuid', nullable: true })
+  ownerId: string | null;
+
+  // 正文来源，前端据此决定 docx 走 OnlyOffice 而非 Vditor；搜索据此决定是否纳入全文索引
+  @Column({
+    name: 'content_source',
+    type: 'enum',
+    enum: ContentSource,
+    default: ContentSource.MANUAL,
+  })
+  contentSource: ContentSource;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

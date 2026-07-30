@@ -1,7 +1,9 @@
 import {
   IsEmail,
   IsEnum,
+  IsOptional,
   IsString,
+  IsUUID,
   Length,
 } from 'class-validator';
 import { UserRole } from '../user.entity';
@@ -12,6 +14,7 @@ import { UserRole } from '../user.entity';
  * - username 唯一，长度 2-100
  * - password 长度 6-100（service 内 bcrypt.hash 后存 passwordHash）
  * - role 必填，admin / editor / viewer
+ * - organizationId 可选，所属组织节点 id（通常为某 group）
  */
 export class CreateUserDto {
   @IsEmail()
@@ -27,4 +30,8 @@ export class CreateUserDto {
 
   @IsEnum(UserRole)
   role: UserRole;
+
+  @IsOptional()
+  @IsUUID()
+  organizationId?: string | null;
 }

@@ -164,6 +164,7 @@ export class UsersService {
       passwordHash,
       role: dto.role,
       status: UserStatus.ACTIVE,
+      organizationId: dto.organizationId ?? null,
     });
     const saved = await this.userRepo.save(user);
     // passwordHash 为 select:false，save 返回的对象理论上不含该字段，这里保险删除
@@ -216,6 +217,9 @@ export class UsersService {
     }
     if (dto.status !== undefined) {
       user.status = dto.status;
+    }
+    if (dto.organizationId !== undefined) {
+      user.organizationId = dto.organizationId;
     }
 
     const saved = await this.userRepo.save(user);

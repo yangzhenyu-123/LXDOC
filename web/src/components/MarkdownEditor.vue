@@ -5,12 +5,15 @@ import Vditor from 'vditor';
 // 必须引入 Vditor 自带的样式
 import 'vditor/dist/index.css';
 import { uploadImage } from '@/api/uploads';
+import { rewriteImageUrls, stripFileTokens } from '@/api/files';
 
 const props = defineProps<{
-  // 受控内容
+  // 受控内容（不含文件 token，存库内容保持干净）
   modelValue: string;
   // 用于图片上传路径（可选）
   docId?: string;
+  // 文件访问签名 token，渲染时拼到 /api/files/... 图片 URL 上（可选）
+  fileToken?: string;
 }>();
 
 const emit = defineEmits<{
@@ -33,7 +36,7 @@ function initVditor() {
   if (!containerRef.value) return;
 
   vditor = new Vditor(containerRef.value, {
-    value: props.modelValue ?? '',
+    value: rewriteImageUrls(props.modelValue ?? '', props.fileToken ?? ''),
     // 即时渲染模式
     mode: 'ir',
     height: '70vh',
@@ -65,7 +68,8 @@ function initVditor() {
     input: (value: string) => {
       // 标记本次为内部 setValue 引发的 input，避免回环
       if (internalUpdate) return;
-      emit('update:modelValue', value);
+      // 回灌前剥离文件 token，保证存库内容不含短期 token
+      emit('update:modelValue', stripFileTokens(value));
     },
     ctrlEnter: () => {
       // Ctrl/Cmd + Enter 触发保存
@@ -91,15 +95,17 @@ function onSaveShortcut(e: KeyboardEvent) {
 
 /**
  * 监听外部 modelValue 变化：仅在与编辑器当前值不一致时调用 setValue，避免光标跳动
+ * setValue 前把图片 URL 拼上文件 token，使编辑器内图片可加载
  */
 watch(
   () => props.modelValue,
   (newVal) => {
     if (!vditor) return;
+    const display = rewriteImageUrls(newVal ?? '', props.fileToken ?? '');
     const current = vditor.getValue();
-    if (newVal !== current) {
+    if (display !== current) {
       internalUpdate = true;
-      vditor.setValue(newVal ?? '');
+      vditor.setValue(display);
       // 下一个事件循环后解除标记，确保 input 回调已触发完毕
       setTimeout(() => {
         internalUpdate = false;

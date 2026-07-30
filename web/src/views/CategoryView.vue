@@ -4,13 +4,17 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import type { UploadFile, UploadInstance, UploadUserFile } from 'element-plus';
 import { getCategoriesTree, type Category } from '@/api/categories';
-import { uploadDocument } from '@/api/uploads';
+import { uploadDocument, type DocumentOwnerType } from '@/api/uploads';
 import {
   listByCategory,
   deleteDocument,
   type DocumentFormat,
   type DocumentListItem,
 } from '@/api/documents';
+import {
+  listOrganizations,
+  type Organization,
+} from '@/api/organizations';
 import { useAuthStore } from '@/stores/auth';
 
 const route = useRoute();
@@ -18,6 +22,31 @@ const router = useRouter();
 const authStore = useAuthStore();
 const categoryId = computed(() => String(route.params.categoryId ?? ''));
 const tree = ref<Category[]>([]);
+
+// 组织列表（用于上传时选择文档归属）
+const orgList = ref<Organization[]>([]);
+const orgMap = computed(() => new Map(orgList.value.map((o) => [o.id, o])));
+
+// 当前用户的组织节点与所在部门（用于"我的组/我的部门"归属选项）
+const userOrg = computed<Organization | null>(() => {
+  const oid = authStore.user?.organizationId;
+  return oid ? (orgMap.value.get(oid) ?? null) : null;
+});
+const userDept = computed<Organization | null>(() => {
+  const org = userOrg.value;
+  if (!org || !org.parentId) return null;
+  return orgMap.value.get(org.parentId) ?? null;
+});
+
+// 组织 id → 完整路径展示
+function orgPathLabel(orgId: string): string {
+  const org = orgMap.value.get(orgId);
+  if (!org) return '';
+  if (!org.path) return org.name;
+  const ids = org.path.split('.').filter(Boolean);
+  const nameMap = new Map(orgList.value.map((o) => [o.id, o.name]));
+  return ids.map((id) => nameMap.get(id) ?? id).join(' / ');
+}
 
 // 递归查找分类节点
 function findCategory(nodes: Category[], id: string): Category | undefined {
@@ -159,6 +188,15 @@ const fileList = ref<UploadUserFile[]>([]);
 // 当前选中的原始 File 对象
 const selectedFile = ref<File | null>(null);
 
+// 文档归属选择
+// - personal: 个人空间（默认）
+// - myGroup: 我的组（用户 organizationId 指向的 group）
+// - myDept: 我的部门（用户所在 group 的父 department）
+// - custom: 任意组织（仅 admin，配合 customOrgId）
+type OwnerChoice = 'personal' | 'myGroup' | 'myDept' | 'custom';
+const ownerChoice = ref<OwnerChoice>('personal');
+const customOrgId = ref<string>('');
+
 function openUploadDialog() {
   if (!categoryId.value) {
     ElMessage.warning('请先选择一个分类');
@@ -166,7 +204,47 @@ function openUploadDialog() {
   }
   selectedFile.value = null;
   fileList.value = [];
+  ownerChoice.value = 'personal';
+  customOrgId.value = '';
   uploadDialog.value.visible = true;
+}
+
+// 是否显示"我的组"选项
+const showMyGroup = computed(
+  () => !!userOrg.value && userOrg.value.type === 'group',
+);
+// 是否显示"我的部门"选项
+const showMyDept = computed(() => !!userDept.value);
+// 是否允许自定义选择任意组织（admin）
+const allowCustomOrg = computed(() => authStore.isAdmin);
+
+/**
+ * 根据归属选择构造上传 owner 参数
+ */
+function buildOwner():
+  | { type: DocumentOwnerType; id?: string | null }
+  | undefined {
+  switch (ownerChoice.value) {
+    case 'personal':
+      return { type: 'personal' };
+    case 'myGroup':
+      return userOrg.value
+        ? { type: 'group', id: userOrg.value.id }
+        : { type: 'personal' };
+    case 'myDept':
+      return userDept.value
+        ? { type: 'department', id: userDept.value.id }
+        : { type: 'personal' };
+    case 'custom': {
+      const org = customOrgId.value
+        ? orgMap.value.get(customOrgId.value)
+        : null;
+      if (!org) return { type: 'personal' };
+      return { type: org.type as DocumentOwnerType, id: org.id };
+    }
+    default:
+      return undefined;
+  }
 }
 
 // el-upload 文件变化回调：保存第一个文件的 raw
@@ -194,9 +272,18 @@ async function submitUpload() {
     ElMessage.warning('缺少分类 id');
     return;
   }
+  // 自定义归属但未选组织时提示
+  if (ownerChoice.value === 'custom' && !customOrgId.value) {
+    ElMessage.warning('请选择目标组织');
+    return;
+  }
   uploadDialog.value.loading = true;
   try {
-    await uploadDocument(selectedFile.value, categoryId.value);
+    await uploadDocument(
+      selectedFile.value,
+      categoryId.value,
+      buildOwner(),
+    );
     ElMessage.success('文档上传成功');
     uploadDialog.value.visible = false;
     selectedFile.value = null;
@@ -269,6 +356,12 @@ onMounted(async () => {
     tree.value = (await getCategoriesTree()) ?? [];
   } catch {
     // 忽略错误，占位页面仍可显示原始 id
+  }
+  // 加载组织列表用于上传归属选择（失败不阻断）
+  try {
+    orgList.value = (await listOrganizations()) ?? [];
+  } catch {
+    orgList.value = [];
   }
   await loadDocuments();
 });
@@ -400,7 +493,7 @@ onMounted(async () => {
     <el-dialog
       v-model="uploadDialog.visible"
       title="上传文档"
-      width="480px"
+      width="500px"
       :close-on-click-modal="false"
     >
       <el-upload
@@ -425,6 +518,39 @@ onMounted(async () => {
           </div>
         </template>
       </el-upload>
+
+      <!-- 文档归属选择：个人 / 我的组 / 我的部门 / 自定义（admin） -->
+      <div class="owner-section">
+        <div class="owner-label">文档归属</div>
+        <el-radio-group v-model="ownerChoice" class="owner-radio-group">
+          <el-radio value="personal">个人空间（仅自己可读）</el-radio>
+          <el-radio v-if="showMyGroup" value="myGroup">
+            我的组：{{ orgPathLabel(userOrg!.id) }}
+          </el-radio>
+          <el-radio v-if="showMyDept" value="myDept">
+            我的部门：{{ userDept!.name }}
+          </el-radio>
+          <el-radio v-if="allowCustomOrg" value="custom">指定组织</el-radio>
+        </el-radio-group>
+        <el-select
+          v-if="allowCustomOrg && ownerChoice === 'custom'"
+          v-model="customOrgId"
+          filterable
+          placeholder="选择目标组织节点"
+          style="width: 100%; margin-top: 8px"
+        >
+          <el-option
+            v-for="o in orgList"
+            :key="o.id"
+            :label="`${o.type === 'department' ? '部门' : '组'} · ${orgPathLabel(o.id)}`"
+            :value="o.id"
+          />
+        </el-select>
+        <div class="owner-tip">
+          归属决定读权限范围：组/部门文档对该节点及子树用户可见；编辑需对应编辑授权。
+        </div>
+      </div>
+
       <template #footer>
         <el-button
           :disabled="uploadDialog.loading"
@@ -478,6 +604,28 @@ onMounted(async () => {
   margin-top: 4px;
   color: #909399;
   font-size: 12px;
+}
+.owner-section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px dashed #ebeef5;
+}
+.owner-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 8px;
+}
+.owner-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.owner-tip {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.5;
 }
 .doc-tag {
   margin-right: 4px;

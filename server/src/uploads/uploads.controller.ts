@@ -52,13 +52,21 @@ export class UploadsController {
         `不支持的文件扩展名 ${ext}，允许：${ALLOWED_EXTENSIONS.join(', ')}`,
       );
     }
-    const doc = await this.service.ingest(file, dto.categoryId, user.id);
+    const doc = await this.service.ingest(
+      file,
+      dto.categoryId,
+      user.id,
+      dto.ownerType,
+      dto.ownerId,
+    );
     return {
       id: doc.id,
       title: doc.title,
       format: doc.format,
       version: doc.version,
       categoryId: doc.categoryId,
+      ownerType: doc.ownerType,
+      ownerId: doc.ownerId,
     };
   }
 

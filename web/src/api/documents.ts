@@ -75,6 +75,74 @@ export async function getPreviewHtml(id: string): Promise<string> {
 }
 
 /**
+ * 获取 PDF 版式保真 HTML（pdf2htmlEX 生成）
+ * GET /documents/:id/pdf-html
+ * 返回 { html: string }
+ */
+export async function getPdfHtml(id: string): Promise<string> {
+  const res = await client.get<{ html: string }, { html: string }>(
+    `/documents/${id}/pdf-html`,
+  );
+  return res?.html ?? '';
+}
+
+/**
+ * 将 PDF 转为可编辑的新 markdown 文档（原 PDF 保留）
+ * POST /documents/:id/convert-to-editable
+ * 返回新创建的文档
+ */
+export function convertToEditable(id: string): Promise<Document> {
+  return client.post<Document, Document>(
+    `/documents/${id}/convert-to-editable`,
+  );
+}
+
+/**
+ * OnlyOffice 前端初始化 config（结构，与后端 OnlyOfficeConfig 对齐）
+ */
+export interface OnlyOfficeConfig {
+  documentType: 'word' | 'cell' | 'slide';
+  document: {
+    fileType: string;
+    key: string;
+    title: string;
+    url: string;
+    permissions: {
+      edit: boolean;
+      download: boolean;
+      print: boolean;
+      review: boolean;
+    };
+  };
+  editorConfig: {
+    mode: 'edit' | 'view';
+    callbackUrl: string;
+    lang: string;
+    user: { id: string; name: string };
+    customization?: {
+      forcesave: boolean;
+      autosave: boolean;
+    };
+  };
+  token?: string;
+}
+
+/**
+ * 获取 OnlyOffice 初始化 config
+ * GET /documents/:id/onlyoffice/config?mode=edit|view
+ * mode 省略时后端按写权限决定
+ */
+export function getOnlyOfficeConfig(
+  id: string,
+  mode?: 'edit' | 'view',
+): Promise<OnlyOfficeConfig> {
+  return client.get<OnlyOfficeConfig, OnlyOfficeConfig>(
+    `/documents/${id}/onlyoffice/config`,
+    { params: mode ? { mode } : {} },
+  );
+}
+
+/**
  * 更新文档（创建版本快照 + version + 1）
  * PUT /documents/:id
  */

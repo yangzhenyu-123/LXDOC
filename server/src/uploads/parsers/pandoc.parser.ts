@@ -13,7 +13,8 @@ import { getUploadDir } from '../../config/upload.config';
 /**
  * Pandoc 解析器
  * 处理 docx / odt：调用 pandoc 转 markdown 并抽取图片到 images 目录
- * 随后改写 markdown 中的图片链接为 /uploads/images/<docId>/xxx
+ * 随后改写 markdown 中的图片链接为 /api/files/<docId>/image/xxx
+ * （存库内容不含 token，渲染时由前端拼 ?token=<fileToken>）
  */
 @Injectable()
 export class PandocParser implements FileParser {
@@ -64,11 +65,11 @@ export class PandocParser implements FileParser {
       }
 
       // 改写 markdown 中的图片链接：
-      // ![..](./media/xxx) 或 ![..](media/xxx) → ![..](/uploads/images/<docId>/xxx)
+      // ![..](./media/xxx) 或 ![..](media/xxx) → ![..](/api/files/<docId>/image/xxx)
       content = content.replace(
         /!\[([^\]]*)\]\(\.?\/?media\/([^)]+)\)/g,
         (_match, alt: string, name: string) =>
-          `![${alt}](/uploads/images/${docId}/${name})`,
+          `![${alt}](/api/files/${docId}/image/${name})`,
       );
 
       return { content };

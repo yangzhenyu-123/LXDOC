@@ -33,8 +33,8 @@ export class CategoriesController {
 
   // 获取分类树（登录可读，无 @Roles）
   @Get()
-  findAll(): Promise<CategoryResponseDto[]> {
-    return this.service.findAll();
+  findAll(@CurrentUser() user: AuthUser): Promise<CategoryResponseDto[]> {
+    return this.service.findAll(user);
   }
 
   // 获取单个分类（登录可读，无 @Roles）

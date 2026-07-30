@@ -1,6 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { Category } from '../categories/category.entity';
+import { AccessControlService } from '../organizations/access-control.service';
+import { AuthUser } from '../common/decorators/current-user.decorator';
+import { DocumentOwnerType } from '../documents/document.entity';
 
 /**
  * 单条检索结果
@@ -42,17 +45,22 @@ interface SearchRow {
 
 @Injectable()
 export class SearchService {
-  constructor(private readonly entityManager: EntityManager) {}
+  constructor(
+    private readonly entityManager: EntityManager,
+    private readonly accessControl: AccessControlService,
+  ) {}
 
   /**
    * 全文检索
    * 1. 用 pg_trgm 的 % 操作符 + ILIKE 组合查询
    * 2. 标题命中加权排前
-   * 3. 批量补 categoryName
-   * 4. 生成高亮片段
+   * 3. 按当前用户读权限过滤可见范围
+   * 4. 批量补 categoryName
+   * 5. 生成高亮片段
    */
   async search(
     q: string,
+    user: AuthUser,
     page = 1,
     pageSize = 20,
   ): Promise<SearchResponse> {
@@ -63,8 +71,32 @@ export class SearchService {
     // ILIKE 模式：'%q%'
     const likePattern = `%${q}%`;
 
+    // 构造读权限 SQL 片段与参数（位置参数从 $5 起，前 4 个留给 likePattern/q/pageSize/offset）
+    const scope = this.accessControl.getReadScope(user);
+    let scopeSql = '';
+    const scopeParams: unknown[] = [];
+    if (!scope.isFullAccess) {
+      // 个人文档 OR 归属祖先 org 的文档
+      // 参数：personal、userId、group、department、ancestorIds[]
+      const ancestorIds = scope.ancestorOrgIds;
+      scopeParams.push(
+        DocumentOwnerType.PERSONAL,
+        scope.userId,
+        DocumentOwnerType.GROUP,
+        DocumentOwnerType.DEPARTMENT,
+      );
+      if (ancestorIds.length > 0) {
+        scopeSql =
+          `AND ( (owner_type = $5 AND owner_id = $6) OR ` +
+          `(owner_type IN ($7,$8) AND owner_id = ANY($9::uuid[])) )`;
+        scopeParams.push(ancestorIds);
+      } else {
+        scopeSql = `AND (owner_type = $5 AND owner_id = $6)`;
+      }
+    }
+
     // 查询命中行 + rank
-    // $1 = likePattern, $2 = q, $3 = pageSize, $4 = offset
+    // $1 = likePattern, $2 = q, $3 = pageSize, $4 = offset, $5+ = scope
     const rows = (await this.entityManager.query(
       `SELECT id, title, content, format, category_id, updated_at, version,
               CASE WHEN title ILIKE $1 THEN 0
@@ -72,18 +104,20 @@ export class SearchService {
                    WHEN content ILIKE $1 THEN 2
                    ELSE 3 END AS rank
        FROM documents
-       WHERE title ILIKE $1 OR content ILIKE $1 OR title % $2 OR content % $2
+       WHERE (title ILIKE $1 OR content ILIKE $1 OR title % $2 OR content % $2)
+       ${scopeSql}
        ORDER BY rank ASC, updated_at DESC
        LIMIT $3 OFFSET $4`,
-      [likePattern, q, safePageSize, offset],
+      [likePattern, q, safePageSize, offset, ...scopeParams],
     )) as SearchRow[];
 
     // 总命中数
     const countRows = (await this.entityManager.query(
       `SELECT COUNT(*)::int AS cnt
        FROM documents
-       WHERE title ILIKE $1 OR content ILIKE $1 OR title % $2 OR content % $2`,
-      [likePattern, q],
+       WHERE (title ILIKE $1 OR content ILIKE $1 OR title % $2 OR content % $2)
+       ${scopeSql}`,
+      [likePattern, q, ...scopeParams],
     )) as { cnt: number }[];
     const total = countRows[0]?.cnt ?? 0;
 

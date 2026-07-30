@@ -8,14 +8,16 @@ import { Category } from './category.entity';
 import { Document } from '../documents/document.entity';
 import { CategoriesService } from './categories.service';
 import { CategoriesController } from './categories.controller';
+import { OrganizationsModule } from '../organizations/organizations.module';
 
 /**
  * 分类模块
  * - 注册 Category / Document 两个实体的 Repository
+ * - 导入 OrganizationsModule 拿 AccessControlService 做读权限过滤
  * - 启动时通过 OnApplicationBootstrap 调用 seedIfEmpty() 自动初始化顶层分类
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Category, Document])],
+  imports: [TypeOrmModule.forFeature([Category, Document]), OrganizationsModule],
   controllers: [CategoriesController],
   providers: [CategoriesService],
   exports: [CategoriesService],

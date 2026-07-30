@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -12,19 +11,15 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { Document, DocumentFormat } from './document.entity';
+import { Document, DocumentFormat, DocumentOwnerType, ContentSource } from './document.entity';
 import { DocumentVersion } from './document-version.entity';
 import { Category } from '../categories/category.entity';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { getUploadDir } from '../config/upload.config';
-
-/**
- * 当前登录用户的最小结构（仅用于权限校验）
- */
-interface CurrentUser {
-  id: string;
-  role: string;
-}
+import { AccessControlService } from '../organizations/access-control.service';
+import { FilesService } from '../files/files.service';
+import { PdfToolsService } from './pdf-tools.service';
+import { AuthUser } from '../common/decorators/current-user.decorator';
 
 /**
  * 文档版本列表响应（不含 content，避免大响应）
@@ -55,6 +50,8 @@ export interface DocumentListItem {
   tags: string[];
   updatedAt: Date;
   createdBy: string | null;
+  ownerType: string;
+  ownerId: string | null;
 }
 
 @Injectable()
@@ -67,15 +64,22 @@ export class DocumentsService {
     @InjectRepository(DocumentVersion)
     private readonly versionRepo: Repository<DocumentVersion>,
     private readonly entityManager: EntityManager,
+    private readonly accessControl: AccessControlService,
+    private readonly filesService: FilesService,
+    private readonly pdfTools: PdfToolsService,
   ) {}
 
   /**
    * 获取单个文档（含 content）
+   * @param user 若提供则校验读权限
    */
-  async findOne(id: string): Promise<Document> {
+  async findOne(id: string, user?: AuthUser): Promise<Document> {
     const doc = await this.documentRepo.findOne({ where: { id } });
     if (!doc) {
       throw new NotFoundException(`文档 ${id} 不存在`);
+    }
+    if (user) {
+      this.accessControl.assertCanRead(user, doc);
     }
     return doc;
   }
@@ -84,11 +88,12 @@ export class DocumentsService {
    * 获取 docx / odt 文档的 HTML 预览片段
    * 1. 校验文档存在、格式为 docx/odt、原文件存在
    * 2. 调用 pandoc 转 HTML（不加 standalone，输出即 body 片段）
-   * 3. 把图片相对路径替换为 /uploads/images/<docId>/xxx
-   * 4. 返回 HTML 字符串
+   * 3. 签发短期文件 token（读权限已在 findOne 中校验）
+   * 4. 把图片相对路径替换为签名 URL /api/files/<docId>/image/<name>?token=
+   * 5. 返回 HTML 字符串
    */
-  async getPreviewHtml(id: string): Promise<string> {
-    const doc = await this.findOne(id);
+  async getPreviewHtml(id: string, user: AuthUser): Promise<string> {
+    const doc = await this.findOne(id, user);
 
     if (
       doc.format !== DocumentFormat.DOCX &&
@@ -123,14 +128,100 @@ export class DocumentsService {
       );
     }
 
-    // 改写图片 src：./media/xxx / media/xxx / images/xxx → /uploads/images/<docId>/xxx
+    // 签发短期文件 token（读权限已在 findOne 中断言通过）
+    const fileToken = this.filesService.signFileToken(id, user.id);
+
+    // 改写图片 src：./media/xxx / media/xxx / images/xxx → /api/files/<docId>/image/<name>?token=
     html = html.replace(
       /src=["']\.?\/?(?:media\/|images\/)?([^"']+)["']/g,
       (_match, name: string) =>
-        `src="/uploads/images/${id}/${name}"`,
+        `src="/api/files/${id}/image/${encodeURIComponent(name)}?token=${fileToken}"`,
     );
 
     return html;
+  }
+
+  /**
+   * 获取 PDF 文档的版式保真 HTML（pdf2htmlEX 生成，带缓存）
+   * 读权限已在 findOne 中校验
+   */
+  async getPdfHtml(id: string, user: AuthUser): Promise<string> {
+    const doc = await this.findOne(id, user);
+    if (doc.format !== DocumentFormat.PDF) {
+      throw new BadRequestException('仅支持 PDF 版式预览');
+    }
+    if (!doc.originalPath) {
+      throw new NotFoundException(`文档 ${id} 缺少原始文件`);
+    }
+    const absPath = path.join(getUploadDir(), doc.originalPath);
+    if (!existsSync(absPath)) {
+      throw new NotFoundException(`原始文件不存在：${doc.originalPath}`);
+    }
+    try {
+      return await this.pdfTools.generateLayoutHtml(absPath, id, doc.version);
+    } catch (err) {
+      throw new InternalServerErrorException(
+        `PDF 版式预览生成失败：${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * 将 PDF 转为可编辑的新 markdown 文档（原 PDF 保留不动）
+   * 流程：soffice PDF→docx → pandoc docx→markdown → 新建 Document(format=md)
+   * 权限：需对原文档有写权限
+   * 新文档继承原文档的 categoryId / ownerType / ownerId，title 加"(可编辑)"后缀
+   */
+  async convertToEditable(id: string, user: AuthUser): Promise<Document> {
+    const doc = await this.findOne(id);
+    await this.accessControl.assertCanWrite(user, doc);
+    if (doc.format !== DocumentFormat.PDF) {
+      throw new BadRequestException('仅支持 PDF 转可编辑');
+    }
+    if (!doc.originalPath) {
+      throw new NotFoundException(`文档 ${id} 缺少原始文件`);
+    }
+    const absPath = path.join(getUploadDir(), doc.originalPath);
+    if (!existsSync(absPath)) {
+      throw new NotFoundException(`原始文件不存在：${doc.originalPath}`);
+    }
+
+    let markdown: string;
+    try {
+      markdown = await this.pdfTools.convertPdfToMarkdown(absPath, id);
+    } catch (err) {
+      throw new InternalServerErrorException(
+        `PDF 转可编辑失败：${(err as Error).message}`,
+      );
+    }
+
+    // 新建 markdown 文档，继承归属与分类
+    const newDoc = this.documentRepo.create({
+      categoryId: doc.categoryId,
+      title: `${doc.title}(可编辑)`,
+      content: markdown,
+      format: DocumentFormat.MD,
+      originalPath: null,
+      version: 1,
+      author: doc.author,
+      tags: [...(doc.tags ?? [])],
+      createdBy: user.id,
+      ownerType: doc.ownerType,
+      ownerId:
+        doc.ownerType === DocumentOwnerType.PERSONAL ? user.id : doc.ownerId,
+      contentSource: ContentSource.MANUAL,
+    });
+    const saved = await this.documentRepo.save(newDoc);
+    // 创建 version=1 初始快照
+    await this.versionRepo.save(
+      this.versionRepo.create({
+        documentId: saved.id,
+        version: 1,
+        content: markdown,
+        snapshotPath: null,
+      }),
+    );
+    return saved;
   }
 
   /**
@@ -175,10 +266,10 @@ export class DocumentsService {
   async update(
     id: string,
     dto: UpdateDocumentDto,
-    currentUser: CurrentUser,
+    currentUser: AuthUser,
   ): Promise<Document> {
     const doc = await this.findOne(id);
-    this.assertCanWrite(doc, currentUser);
+    await this.accessControl.assertCanWrite(currentUser, doc);
 
     return this.entityManager.transaction(async (manager) => {
       const docRepo = manager.getRepository(Document);
@@ -218,9 +309,9 @@ export class DocumentsService {
   /**
    * 列出文档的所有版本（按 version DESC），不含 content
    */
-  async listVersions(id: string): Promise<DocumentVersionListItem[]> {
-    // 校验文档存在
-    await this.findOne(id);
+  async listVersions(id: string, user: AuthUser): Promise<DocumentVersionListItem[]> {
+    // 校验文档存在 + 读权限
+    await this.findOne(id, user);
     const versions = await this.versionRepo.find({
       where: { documentId: id },
       order: { version: 'DESC' },
@@ -239,9 +330,10 @@ export class DocumentsService {
   async getVersion(
     id: string,
     version: number,
+    user: AuthUser,
   ): Promise<DocumentVersionContent> {
-    // 校验文档存在
-    await this.findOne(id);
+    // 校验文档存在 + 读权限
+    await this.findOne(id, user);
     const v = await this.versionRepo.findOne({
       where: { documentId: id, version },
     });
@@ -267,10 +359,10 @@ export class DocumentsService {
   async rollback(
     id: string,
     version: number,
-    currentUser: CurrentUser,
+    currentUser: AuthUser,
   ): Promise<Document> {
     const doc = await this.findOne(id);
-    this.assertCanWrite(doc, currentUser);
+    await this.accessControl.assertCanWrite(currentUser, doc);
     const target = await this.versionRepo.findOne({
       where: { documentId: id, version },
     });
@@ -320,10 +412,10 @@ export class DocumentsService {
    */
   async remove(
     id: string,
-    currentUser: CurrentUser,
+    currentUser: AuthUser,
   ): Promise<void> {
     const doc = await this.findOne(id);
-    this.assertCanWrite(doc, currentUser);
+    await this.accessControl.assertCanWrite(currentUser, doc);
 
     await this.entityManager.transaction(async (manager) => {
       const docRepo = manager.getRepository(Document);
@@ -363,10 +455,11 @@ export class DocumentsService {
   /**
    * 列出最近更新的 N 篇文档（按 updatedAt DESC），不含 content
    * limit 上限 50，避免一次拉取过多
+   * 按当前用户读权限过滤可见范围
    */
-  async findRecent(limit: number): Promise<DocumentListItem[]> {
+  async findRecent(limit: number, user: AuthUser): Promise<DocumentListItem[]> {
     const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 50) : 10;
-    const docs = await this.documentRepo
+    const qb = this.documentRepo
       .createQueryBuilder('d')
       .select([
         'd.id',
@@ -376,10 +469,13 @@ export class DocumentsService {
         'd.tags',
         'd.updatedAt',
         'd.createdBy',
+        'd.ownerType',
+        'd.ownerId',
       ])
       .orderBy('d.updatedAt', 'DESC')
-      .limit(safeLimit)
-      .getMany();
+      .limit(safeLimit);
+    this.accessControl.applyReadScopeToQb(qb, user);
+    const docs = await qb.getMany();
 
     return docs.map((d) => ({
       id: d.id,
@@ -389,15 +485,19 @@ export class DocumentsService {
       tags: d.tags ?? [],
       updatedAt: d.updatedAt,
       createdBy: d.createdBy,
+      ownerType: d.ownerType,
+      ownerId: d.ownerId,
     }));
   }
 
   /**
    * 列出某分类下的所有文档（不含 content）
    * 若 includeChildren=true，递归包含所有子分类下的文档
+   * 按当前用户读权限过滤可见范围
    */
   async listByCategory(
     categoryId: string,
+    user: AuthUser,
     includeChildren = false,
   ): Promise<DocumentListItem[]> {
     let categoryIds: string[] = [categoryId];
@@ -407,7 +507,7 @@ export class DocumentsService {
       categoryIds = await this.collectDescendantCategoryIds(categoryId);
     }
 
-    const docs = await this.documentRepo
+    const qb = this.documentRepo
       .createQueryBuilder('d')
       .select([
         'd.id',
@@ -417,10 +517,13 @@ export class DocumentsService {
         'd.tags',
         'd.updatedAt',
         'd.createdBy',
+        'd.ownerType',
+        'd.ownerId',
       ])
       .where('d.category_id IN (:...ids)', { ids: categoryIds })
-      .orderBy('d.updatedAt', 'DESC')
-      .getMany();
+      .orderBy('d.updatedAt', 'DESC');
+    this.accessControl.applyReadScopeToQb(qb, user);
+    const docs = await qb.getMany();
 
     return docs.map((d) => ({
       id: d.id,
@@ -430,28 +533,9 @@ export class DocumentsService {
       tags: d.tags ?? [],
       updatedAt: d.updatedAt,
       createdBy: d.createdBy,
+      ownerType: d.ownerType,
+      ownerId: d.ownerId,
     }));
-  }
-
-  /**
-   * 校验当前用户是否可写指定文档
-   * - admin 全权
-   * - editor 仅当 document.createdBy === currentUser.id 时允许
-   * - 其他（含 viewer）拒绝
-   * 注意：findOne（GET 单个）等读操作不走此校验，所有登录用户可读任意文档（MVP 不做文档级读权限）
-   */
-  private assertCanWrite(doc: Document, currentUser: CurrentUser): void {
-    if (currentUser.role === 'admin') {
-      return;
-    }
-    if (
-      currentUser.role === 'editor' &&
-      doc.createdBy !== null &&
-      doc.createdBy === currentUser.id
-    ) {
-      return;
-    }
-    throw new ForbiddenException('无权修改他人文档');
   }
 
   /**

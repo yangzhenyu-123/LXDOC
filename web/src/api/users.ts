@@ -8,6 +8,8 @@ export interface UserItem {
   username: string;
   role: UserRole;
   status: UserStatus;
+  // 所属组织节点 id（通常指向某个 group，null 表示未分配）
+  organizationId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -31,6 +33,8 @@ export interface UpdateUserDto {
   username?: string;
   role?: string;
   status?: string;
+  // 所属组织节点 id，传 null 表示清除归属
+  organizationId?: string | null;
 }
 
 /**

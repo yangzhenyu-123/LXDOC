@@ -1,4 +1,10 @@
-import { IsEnum, IsOptional, IsString, Length } from 'class-validator';
+import {
+  IsEnum,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Length,
+} from 'class-validator';
 import { UserRole, UserStatus } from '../user.entity';
 
 /**
@@ -20,4 +26,9 @@ export class UpdateUserDto {
   @IsOptional()
   @IsEnum(UserStatus)
   status?: UserStatus;
+
+  // 所属组织节点 id，传 null 表示清除归属（变为无组织用户）
+  @IsOptional()
+  @IsUUID()
+  organizationId?: string | null;
 }

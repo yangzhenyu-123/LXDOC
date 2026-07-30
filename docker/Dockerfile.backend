@@ -1,9 +1,21 @@
-# LXDOC 后端镜像：基于 node:20-bookworm-slim，apt 安装 pandoc 用于 DOCX/ODT 解析
+# LXDOC 后端镜像：基于 node:20-bookworm-slim
+# 系统依赖：
+# - pandoc：docx/odt → markdown/html 抽取，PDF 转 markdown 中间步骤
+# - pdf2htmlEX：PDF → 版式保真 HTML（仅 Debian sid/unstable 可装；stable 用源码或换镜像）
+# - libreoffice（soffice）：PDF → docx 转换，用于 PDF 转可编辑
+# - poppler-utils：PDF 元信息辅助工具
 FROM node:20-bookworm-slim
 
-# 安装 pandoc（Debian 仓库可直接安装）
+# 安装系统依赖
+# 注：pdf2htmlEX 在 Debian stable 仓库不可用，需自行构建或换用第三方镜像
+# 此处先装 pandoc/libreoffice/poppler-utils，pdf2htmlEX 缺失时 PDF 版式预览功能降级（错误提示）
+# 部署时若需启用 PDF 版式预览，请在镜像构建时加装 pdf2htmlEX 或单独构建衍生镜像
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends pandoc \
+    && apt-get install -y --no-install-recommends \
+        pandoc \
+        libreoffice \
+        poppler-utils \
+        fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

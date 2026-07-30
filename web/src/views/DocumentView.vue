@@ -4,22 +4,34 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import MarkdownEditor from '@/components/MarkdownEditor.vue';
 import PdfViewer from '@/components/PdfViewer.vue';
+import OnlyOfficeEditor from '@/components/OnlyOfficeEditor.vue';
 import {
   getDocument,
   getPreviewHtml,
+  getPdfHtml,
+  convertToEditable,
   listVersions,
   rollback as rollbackApi,
   updateDocument,
   type Document,
   type DocumentVersion,
 } from '@/api/documents';
+import {
+  getFileToken,
+  buildOriginalUrl,
+  invalidateFileToken,
+} from '@/api/files';
+import { useAuthStore } from '@/stores/auth';
 
 const route = useRoute();
 const router = useRouter();
+const authStore = useAuthStore();
 const docId = computed(() => String(route.params.docId ?? ''));
 
 // 文档实体
 const doc = ref<Document | null>(null);
+// 文件访问签名 token（加载文档时获取，供 PDF 原文件 / 编辑器图片加载使用）
+const fileToken = ref('');
 // 版本列表
 const versions = ref<DocumentVersion[]>([]);
 // 选中的版本号（用于回滚）
@@ -47,25 +59,43 @@ const savedSnapshot = ref<{ title: string; content: string; tags: string[] }>({
   tags: [],
 });
 
-// 是否为可编辑文档格式（md/txt/docx/odt）
+// 是否为可编辑文档格式（md/txt/docx/odt/pdf，PDF 全文入库后亦可编辑文本）
+// docx/odt 走 OnlyOffice，无需"保存"按钮（OnlyOffice 自行保存）
 const isEditable = computed(() => {
   const f = doc.value?.format;
-  return f === 'md' || f === 'txt' || f === 'docx' || f === 'odt';
+  return f === 'md' || f === 'txt' || f === 'pdf';
 });
 
 // 是否为 PDF 格式
 const isPdf = computed(() => doc.value?.format === 'pdf');
 
-// 是否为 docx/odt（可编辑 + 可原版预览）
+// 是否为 docx/odt（走 OnlyOffice 编辑/查看）
 const isDocLike = computed(() => {
   const f = doc.value?.format;
   return f === 'docx' || f === 'odt';
 });
 
-// PDF 预览 URL：originalPath → /uploads/<originalPath>
-const pdfUrl = computed(() =>
-  doc.value?.originalPath ? `/uploads/${doc.value.originalPath}` : '',
+// OnlyOffice 模式：有写权限用 edit，否则 view
+const onlyofficeMode = computed<'edit' | 'view'>(() =>
+  authStore.canWrite ? 'edit' : 'view',
 );
+
+// PDF 预览 URL：走鉴权签名接口 /api/files/:docId/original?token=
+const pdfUrl = computed(() =>
+  doc.value && fileToken.value
+    ? buildOriginalUrl(doc.value.id, fileToken.value)
+    : '',
+);
+
+// PDF 三 tab：版式预览（pdf2htmlEX） / 翻页预览（pdfjs） / 编辑文本（Vditor）
+const pdfTab = ref<'layout' | 'pages' | 'text'>('layout');
+const pdfLayoutHtml = ref('');
+const pdfLayoutLoading = ref(false);
+const pdfLayoutError = ref<string | null>(null);
+
+// 转为可编辑文档（需写权限，editor/admin）
+const convertLoading = ref(false);
+const canConvert = computed(() => authStore.canWrite);
 
 // docx/odt 模式切换：edit（编辑） / preview（原版预览）
 const docMode = ref<'edit' | 'preview'>('edit');
@@ -108,6 +138,9 @@ async function loadDocument() {
   }
   loading.value = true;
   loadError.value = null;
+  // 切换文档时失效旧 token 缓存，强制重新获取
+  invalidateFileToken(docId.value);
+  fileToken.value = '';
   try {
     const data = await getDocument(docId.value);
     doc.value = data;
@@ -124,6 +157,12 @@ async function loadDocument() {
     docMode.value = 'edit';
     previewHtml.value = '';
     previewError.value = null;
+    // 重置 PDF tab 状态
+    pdfTab.value = 'layout';
+    pdfLayoutHtml.value = '';
+    pdfLayoutError.value = null;
+    // 获取文件访问 token（PDF 原文件 / 编辑器图片加载需要）
+    fileToken.value = await getFileToken(docId.value);
     await loadVersions();
   } catch (err: any) {
     const msg =
@@ -169,15 +208,10 @@ function removeTag(t: string) {
  * 保存文档
  * - 若内容未变化，提示并跳过
  * - 调用 updateDocument，成功后刷新版本下拉
- * - PDF 模式下只更新 title（content 保持 null）
+ * - PDF 模式下同样保存 title + content（全文入库后可编辑文本）
  */
 async function save() {
   if (!doc.value) return;
-  // PDF 模式下走 saveTitle 逻辑
-  if (isPdf.value) {
-    await saveTitle();
-    return;
-  }
   if (!checkDirty()) {
     ElMessage.info('内容未变化，无需保存');
     return;
@@ -211,36 +245,50 @@ async function save() {
 }
 
 /**
- * 仅保存标题（PDF 模式）
- * PUT 时只更新 title，content 保持 null
+ * 加载 PDF 版式保真 HTML（pdf2htmlEX 生成）
  */
-async function saveTitle() {
-  if (!doc.value) return;
-  if (titleInput.value === savedSnapshot.value.title) {
-    ElMessage.info('标题未变化');
-    return;
-  }
-  saving.value = true;
+async function loadPdfLayoutHtml() {
+  if (!docId.value) return;
+  pdfLayoutLoading.value = true;
+  pdfLayoutError.value = null;
   try {
-    const updated = await updateDocument(docId.value, {
-      title: titleInput.value,
-    });
-    doc.value = updated;
-    titleInput.value = updated.title ?? '';
-    savedSnapshot.value = {
-      title: updated.title ?? '',
-      content: savedSnapshot.value.content,
-      tags: savedSnapshot.value.tags,
-    };
-    selectedVersion.value = updated.version;
-    ElMessage.success('保存成功');
-    await loadVersions();
+    pdfLayoutHtml.value = await getPdfHtml(docId.value);
   } catch (err: any) {
     const msg =
-      err?.response?.data?.message ?? err?.message ?? '保存失败';
-    ElMessage.error(`保存失败：${msg}`);
+      err?.response?.data?.message ?? err?.message ?? '版式预览加载失败';
+    pdfLayoutError.value = msg;
+    pdfLayoutHtml.value = '';
   } finally {
-    saving.value = false;
+    pdfLayoutLoading.value = false;
+  }
+}
+
+/**
+ * 将 PDF 转为可编辑的新 markdown 文档
+ * 成功后跳转到新文档
+ */
+async function onConvertToEditable() {
+  if (!doc.value) return;
+  try {
+    await ElMessageBox.confirm(
+      '将基于此 PDF 生成一份可编辑的 Markdown 文档（原 PDF 保留不动），是否继续？',
+      '转为可编辑',
+      { type: 'info', confirmButtonText: '转换', cancelButtonText: '取消' },
+    );
+  } catch {
+    return;
+  }
+  convertLoading.value = true;
+  try {
+    const newDoc = await convertToEditable(docId.value);
+    ElMessage.success('已生成可编辑文档，正在跳转');
+    router.push(`/d/${newDoc.id}`);
+  } catch (err: any) {
+    const msg =
+      err?.response?.data?.message ?? err?.message ?? '转换失败';
+    ElMessage.error(`转换失败：${msg}`);
+  } finally {
+    convertLoading.value = false;
   }
 }
 
@@ -263,10 +311,32 @@ async function loadPreviewHtml() {
   }
 }
 
+/**
+ * OnlyOffice 保存回调成功后：刷新文档元信息 + 版本下拉
+ * 后端已 version+1 并写快照，前端只需重新拉取展示
+ */
+async function onOnlyOfficeSaved() {
+  try {
+    const data = await getDocument(docId.value);
+    doc.value = data;
+    selectedVersion.value = data.version;
+    await loadVersions();
+  } catch {
+    // 刷新失败不阻断编辑，用户可手动刷新
+  }
+}
+
 // docx/odt 模式切换：进入预览模式时拉取 HTML
 watch(docMode, (mode) => {
   if (mode === 'preview' && !previewHtml.value && !previewError.value) {
     loadPreviewHtml();
+  }
+});
+
+// PDF tab 切换：首次进入"版式预览"时懒加载 pdf2htmlEX HTML
+watch(pdfTab, (tab) => {
+  if (tab === 'layout' && !pdfLayoutHtml.value && !pdfLayoutError.value) {
+    loadPdfLayoutHtml();
   }
 });
 
@@ -343,9 +413,8 @@ onMounted(() => {
         placeholder="文档标题"
         clearable
       />
-      <!-- PDF 模式下隐藏主保存按钮，改为「保存标题」 -->
+      <!-- 保存（PDF 全文入库后亦可编辑文本，统一保存 title+content） -->
       <el-button
-        v-if="!isPdf"
         type="primary"
         :loading="saving"
         :disabled="!isEditable"
@@ -353,13 +422,13 @@ onMounted(() => {
       >
         保存
       </el-button>
+      <!-- PDF 转为可编辑文档（需写权限） -->
       <el-button
-        v-else
-        type="primary"
-        :loading="saving"
-        @click="saveTitle"
+        v-if="isPdf && canConvert"
+        :loading="convertLoading"
+        @click="onConvertToEditable"
       >
-        保存标题
+        转为可编辑文档
       </el-button>
       <el-select
         v-model="selectedVersion"
@@ -397,22 +466,57 @@ onMounted(() => {
       <div v-else-if="doc" class="content-wrapper">
         <!-- 左侧主区 -->
         <div class="main">
-          <!-- PDF：直接用 PdfViewer 渲染原文件 -->
-          <PdfViewer
-            v-if="isPdf"
-            :src="pdfUrl"
-          />
-          <!-- docx/odt：编辑 / 原版预览 切换 -->
-          <template v-else-if="isDocLike">
-            <el-radio-group v-model="docMode" class="doc-mode-switch">
-              <el-radio-button value="edit">编辑</el-radio-button>
-              <el-radio-button value="preview">原版预览</el-radio-button>
+          <!-- PDF：版式预览 / 翻页预览 / 编辑文本 三 tab -->
+          <template v-if="isPdf">
+            <el-radio-group v-model="pdfTab" class="doc-mode-switch">
+              <el-radio-button value="layout">版式预览</el-radio-button>
+              <el-radio-button value="pages">翻页预览</el-radio-button>
+              <el-radio-button value="text">编辑文本</el-radio-button>
             </el-radio-group>
+            <!-- 版式预览：pdf2htmlEX 生成的保真 HTML -->
+            <div
+              v-if="pdfTab === 'layout'"
+              class="preview-wrap"
+              v-loading="pdfLayoutLoading"
+            >
+              <el-alert
+                v-if="pdfLayoutError"
+                :title="pdfLayoutError"
+                type="error"
+                show-icon
+                :closable="false"
+              />
+              <div
+                v-else
+                class="preview-html pdf-layout-html"
+                v-html="pdfLayoutHtml"
+              />
+            </div>
+            <!-- 翻页预览：pdfjs canvas 渲染原文件 -->
+            <PdfViewer
+              v-else-if="pdfTab === 'pages'"
+              :src="pdfUrl"
+            />
+            <!-- 编辑文本：编辑 pdf-parse 提取的全文 -->
             <MarkdownEditor
-              v-if="docMode === 'edit'"
+              v-else
               v-model="contentInput"
               :doc-id="docId"
+              :file-token="fileToken"
               @save="save"
+            />
+          </template>
+          <!-- docx/odt：OnlyOffice 真编辑 / pandoc 原版预览 切换 -->
+          <template v-else-if="isDocLike">
+            <el-radio-group v-model="docMode" class="doc-mode-switch">
+              <el-radio-button value="edit">{{ onlyofficeMode === 'edit' ? '编辑' : '查看' }}</el-radio-button>
+              <el-radio-button value="preview">原版预览</el-radio-button>
+            </el-radio-group>
+            <OnlyOfficeEditor
+              v-if="docMode === 'edit'"
+              :doc-id="docId"
+              :mode="onlyofficeMode"
+              @saved="onOnlyOfficeSaved"
             />
             <div v-else class="preview-wrap" v-loading="previewLoading">
               <el-alert
@@ -434,6 +538,7 @@ onMounted(() => {
             v-else-if="isEditable"
             v-model="contentInput"
             :doc-id="docId"
+            :file-token="fileToken"
             @save="save"
           />
           <el-empty v-else :description="`暂不支持的格式：${doc.format}`" />

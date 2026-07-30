@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
 import {
   listUsersApi,
@@ -8,9 +8,13 @@ import {
   deleteUserApi,
   type UserItem,
 } from '@/api/users';
+import {
+  listOrganizations,
+  type Organization,
+} from '@/api/organizations';
 import { useAuthStore } from '@/stores/auth';
 
-// 用户管理页：管理员可创建用户、改角色、启用/禁用、删除
+// 用户管理页：管理员可创建用户、改角色、启用/禁用、分配所属组织、删除
 const authStore = useAuthStore();
 
 // 列表数据
@@ -19,6 +23,21 @@ const total = ref(0);
 const loading = ref(false);
 const page = ref(1);
 const pageSize = ref(20);
+
+// 组织列表（用于所属组织列展示与编辑）
+const orgList = ref<Organization[]>([]);
+const orgMap = computed(() => new Map(orgList.value.map((o) => [o.id, o])));
+
+// 组织 id → 完整路径展示（研发部 / 前端组）
+function orgLabel(orgId: string | null | undefined): string {
+  if (!orgId) return '未分配';
+  const org = orgMap.value.get(orgId);
+  if (!org) return '组织已删除';
+  if (!org.path) return org.name;
+  const ids = org.path.split('.').filter(Boolean);
+  const nameMap = new Map(orgList.value.map((o) => [o.id, o.name]));
+  return ids.map((id) => nameMap.get(id) ?? id).join(' / ');
+}
 
 // 新建用户对话框
 const createVisible = ref(false);
@@ -82,6 +101,33 @@ async function loadUsers() {
     ElMessage.error(typeof msg === 'string' ? msg : '加载用户列表失败');
   } finally {
     loading.value = false;
+  }
+}
+
+/**
+ * 加载组织列表（用于所属组织列展示与编辑下拉）
+ */
+async function loadOrganizations() {
+  try {
+    orgList.value = (await listOrganizations()) ?? [];
+  } catch (e: any) {
+    // 加载组织失败不阻断用户列表
+    orgList.value = [];
+  }
+}
+
+/**
+ * 修改用户所属组织（传 null 表示清除归属）
+ */
+async function onOrgChange(row: UserItem, newOrgId: string | null) {
+  try {
+    await updateUserApi(row.id, { organizationId: newOrgId });
+    ElMessage.success('所属组织已更新');
+    await loadUsers();
+  } catch (e: any) {
+    const msg = e?.response?.data?.message || e?.message || '更新组织失败';
+    ElMessage.error(typeof msg === 'string' ? msg : '更新组织失败');
+    await loadUsers();
   }
 }
 
@@ -188,7 +234,10 @@ function onPageChange(p: number) {
   loadUsers();
 }
 
-onMounted(loadUsers);
+onMounted(() => {
+  loadUsers();
+  loadOrganizations();
+});
 </script>
 
 <template>
@@ -210,6 +259,26 @@ onMounted(loadUsers);
     >
       <el-table-column prop="email" label="邮箱" min-width="200" />
       <el-table-column prop="username" label="用户名" min-width="140" />
+      <el-table-column label="所属组织" min-width="200">
+        <template #default="{ row }">
+          <el-select
+            :model-value="row.organizationId ?? ''"
+            size="small"
+            filterable
+            placeholder="未分配"
+            style="width: 180px"
+            @change="(v: string) => onOrgChange(row, v || null)"
+          >
+            <el-option label="未分配" value="" />
+            <el-option
+              v-for="o in orgList"
+              :key="o.id"
+              :label="orgLabel(o.id)"
+              :value="o.id"
+            />
+          </el-select>
+        </template>
+      </el-table-column>
       <el-table-column label="角色" width="160">
         <template #default="{ row }">
           <el-select

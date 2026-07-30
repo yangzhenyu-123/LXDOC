@@ -13,6 +13,8 @@ export interface AuthUser {
   username: string;
   role: UserRole;
   status: UserStatus;
+  // 所属组织节点 id（全局 admin 或未分配组织时为 null）
+  organizationId: string | null;
 }
 
 // 登录/注册响应

@@ -10,7 +10,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 ).href;
 
 const props = defineProps<{
-  // pdf 文件 URL，例如 /uploads/original/<docId>/<file> 或绝对路径
+  // pdf 文件签名 URL，例如 /api/files/<docId>/original?token=<fileToken>
   src: string;
 }>();
 

@@ -10,7 +10,7 @@ import { Repository } from 'typeorm';
 import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import { Document, DocumentFormat } from '../documents/document.entity';
+import { Document, DocumentFormat, DocumentOwnerType, ContentSource } from '../documents/document.entity';
 import { DocumentVersion } from '../documents/document-version.entity';
 import { Category } from '../categories/category.entity';
 import { TextParser } from './parsers/text.parser';
@@ -69,6 +69,8 @@ export class UploadsService {
     file: Express.Multer.File,
     categoryId: string,
     userId: string,
+    ownerType: DocumentOwnerType = DocumentOwnerType.PERSONAL,
+    ownerId?: string,
   ): Promise<Document> {
     if (!file) {
       throw new BadRequestException('未提供上传文件');
@@ -96,6 +98,25 @@ export class UploadsService {
 
     // 1. 先创建 Document 行（content=null, originalPath=null, version=1）
     // createdBy 记录上传者，用于权限校验与"我的文档"视图
+    // ownerType/ownerId 决定文档归属（personal=个人空间，group/department=组织空间）
+    // contentSource 按格式预设：md/txt=manual，docx/odt=pandoc（索引文本），pdf=pdf_text
+    const resolvedOwnerId =
+      ownerType === DocumentOwnerType.PERSONAL ? userId : (ownerId ?? null);
+    if (
+      (ownerType === DocumentOwnerType.GROUP ||
+        ownerType === DocumentOwnerType.DEPARTMENT) &&
+      !resolvedOwnerId
+    ) {
+      throw new BadRequestException(
+        `ownerType=${ownerType} 需提供 ownerId（组织节点 id）`,
+      );
+    }
+    const initialContentSource =
+      format === DocumentFormat.PDF
+        ? ContentSource.PDF_TEXT
+        : format === DocumentFormat.DOCX || format === DocumentFormat.ODT
+          ? ContentSource.PANDOC
+          : ContentSource.MANUAL;
     const doc = this.documentRepo.create({
       categoryId,
       title,
@@ -104,6 +125,9 @@ export class UploadsService {
       originalPath: null,
       version: 1,
       createdBy: userId,
+      ownerType,
+      ownerId: resolvedOwnerId,
+      contentSource: initialContentSource,
     });
     const saved = await this.documentRepo.save(doc);
     const docId = saved.id;
@@ -235,7 +259,8 @@ export class UploadsService {
     await fs.writeFile(absPath, file.buffer);
 
     return {
-      url: `/uploads/images/${scope}/${filename}`,
+      // 走鉴权文件接口，前端渲染时拼 ?token=<fileToken>
+      url: `/api/files/${scope}/image/${filename}`,
       filename,
     };
   }

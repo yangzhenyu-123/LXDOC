@@ -35,6 +35,19 @@ services:
       DB_PASS: lxdoc
       DB_NAME: lxdoc
       UPLOAD_DIR: /app/uploads
+      # OnlyOffice 集成
+      ONLYOFFICE_ENABLED: "true"
+      ONLYOFFICE_URL: http://onlyoffice
+      ONLYOFFICE_PUBLIC_URL: /onlyoffice
+      BACKEND_PUBLIC_URL: http://backend:3000
+      ONLYOFFICE_JWT_SECRET: lxdoc-onlyoffice-dev-secret
+      # PDF 工具二进制（容器内已安装）
+      PDF2HTML_BIN: pdf2htmlEX
+      SOFFICE_BIN: soffice
+      # LLM（默认关闭，待内网 GLM5.2 接入时开启）
+      LLM_ENABLED: "false"
+      LLM_BASE_URL: http://internal-glm/v1
+      LLM_MODEL: glm-5.2
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,6 +63,24 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    restart: unless-stopped
+
+  # OnlyOffice Document Server（docx/odt 原格式编辑）
+  # AGPL 许可，仅自用/内部部署合规；商业发行需购买商业版
+  onlyoffice:
+    image: onlyoffice/documentserver:latest
+    container_name: lxdoc-onlyoffice
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: lxdoc-onlyoffice-dev-secret
+      # 允许回调后端地址（CORS / 拉取文件 URL 白名单）
+      USE_UNAUTHORIZED_STORAGE: "true"
+    volumes:
+      # 持久化文档转换缓存与字体
+      - onlyoffice-data:/var/www/onlyoffice/Data
+      - onlyoffice-cache:/var/lib/onlyoffice
+    ports:
+      - "8081:80"
     restart: unless-stopped
 
   # 前端 nginx 服务
@@ -76,3 +107,5 @@ services:
 
 volumes:
   postgres-data:
+  onlyoffice-data:
+  onlyoffice-cache:

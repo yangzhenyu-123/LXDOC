@@ -12,6 +12,9 @@ import { Document } from '../documents/document.entity';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { CategoryResponseDto } from './dto/category-response.dto';
+import { AccessControlService } from '../organizations/access-control.service';
+import { AuthUser } from '../common/decorators/current-user.decorator';
+import { UserRole } from '../users/user.entity';
 
 /**
  * 当前登录用户的最小结构（仅用于权限校验）
@@ -30,16 +33,32 @@ export class CategoriesService {
     private readonly categoryRepo: Repository<Category>,
     @InjectRepository(Document)
     private readonly documentRepo: Repository<Document>,
+    private readonly accessControl: AccessControlService,
   ) {}
 
   /**
    * 查询全部分类并在内存中构建树
    * 顶层节点 parentId 为 null
+   * 按当前用户读权限过滤：admin 见全部；非 admin 见公共树(organizationId IS NULL)
+   * + 所属组织祖先链上的组织分类
    */
-  async findAll(): Promise<CategoryResponseDto[]> {
-    const all = await this.categoryRepo.find({
-      order: { sort: 'ASC', createdAt: 'ASC' },
-    });
+  async findAll(user?: AuthUser): Promise<CategoryResponseDto[]> {
+    const qb = this.categoryRepo
+      .createQueryBuilder('c')
+      .orderBy('c.sort', 'ASC')
+      .addOrderBy('c.createdAt', 'ASC');
+    if (user && user.role !== UserRole.ADMIN) {
+      const ancestorIds = this.accessControl.getReadScope(user).ancestorOrgIds;
+      if (ancestorIds.length > 0) {
+        qb.andWhere(
+          '(c.organizationId IS NULL OR c.organizationId IN (:...ancestorIds))',
+          { ancestorIds },
+        );
+      } else {
+        qb.andWhere('c.organizationId IS NULL');
+      }
+    }
+    const all = await qb.getMany();
     return this.buildTree(all);
   }
 

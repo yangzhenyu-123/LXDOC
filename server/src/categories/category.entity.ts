@@ -45,6 +45,11 @@ export class Category {
   @Column({ name: 'created_by', type: 'uuid', nullable: true })
   createdBy: string | null;
 
+  // 所属组织节点 id；null 表示全站公共分类树（三个种子顶层分类为 null）
+  @Index()
+  @Column({ name: 'organization_id', type: 'uuid', nullable: true })
+  organizationId: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
 }

@@ -159,6 +159,13 @@ function goUsers() {
 }
 
 /**
+ * 跳转组织管理页
+ */
+function goOrganizations() {
+  router.push('/admin/organizations');
+}
+
+/**
  * 跳转审计日志页
  */
 function goAudit() {
@@ -178,6 +185,9 @@ function handleCommand(cmd: string) {
       break;
     case 'users':
       goUsers();
+      break;
+    case 'organizations':
+      goOrganizations();
       break;
     case 'audit':
       goAudit();
@@ -252,6 +262,7 @@ onMounted(() => {
               <el-dropdown-item divided command="logout">退出登录</el-dropdown-item>
               <template v-if="authStore.isAdmin">
                 <el-dropdown-item divided command="users">用户管理</el-dropdown-item>
+                <el-dropdown-item command="organizations">组织管理</el-dropdown-item>
                 <el-dropdown-item command="audit">审计日志</el-dropdown-item>
               </template>
             </el-dropdown-menu>

@@ -9,6 +9,7 @@ import * as bcrypt from 'bcryptjs';
 import { authConfig } from '../config/auth.config';
 import { User, UserRole, UserStatus } from '../users/user.entity';
 import { UsersService } from '../users/users.service';
+import { OrganizationsService } from '../organizations/organizations.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -18,8 +19,16 @@ import { RegisterDto } from './dto/register.dto';
  */
 export type SafeUser = Pick<
   User,
-  'id' | 'email' | 'username' | 'role' | 'status'
+  'id' | 'email' | 'username' | 'role' | 'status' | 'organizationId'
 >;
+
+/**
+ * 用户的组织上下文：所属组织 id 与物化路径（用于 JWT 与权限判断）
+ */
+interface OrgContext {
+  organizationId: string | null;
+  orgPath: string | null;
+}
 
 /**
  * 登录成功返回结构
@@ -48,8 +57,26 @@ export class AuthService {
 
   constructor(
     private readonly usersService: UsersService,
+    private readonly organizationsService: OrganizationsService,
     private readonly jwtService: JwtService,
   ) {}
+
+  /**
+   * 解析用户的组织上下文：organizationId + orgPath
+   * 用户无 organizationId 或组织已被删除时返回 null/null，不阻断登录
+   */
+  private async resolveOrgContext(user: User): Promise<OrgContext> {
+    if (!user.organizationId) {
+      return { organizationId: null, orgPath: null };
+    }
+    const org = await this.organizationsService.findByIdOrNull(
+      user.organizationId,
+    );
+    if (!org) {
+      return { organizationId: null, orgPath: null };
+    }
+    return { organizationId: org.id, orgPath: org.path };
+  }
 
   /**
    * 登录：校验邮箱+密码，签发 access + refresh token
@@ -72,7 +99,8 @@ export class AuthService {
       throw new UnauthorizedException('账户已被禁用');
     }
 
-    const accessToken = this.signAccessToken(user);
+    const orgContext = await this.resolveOrgContext(user);
+    const accessToken = this.signAccessToken(user, orgContext);
     const refreshToken = this.signRefreshToken(user);
 
     // 存入内存 Map，便于后续 logout / refresh 校验
@@ -122,7 +150,8 @@ export class AuthService {
       throw new UnauthorizedException('账户已被禁用');
     }
 
-    const accessToken = this.signAccessToken(user);
+    const orgContext = await this.resolveOrgContext(user);
+    const accessToken = this.signAccessToken(user, orgContext);
     return { accessToken };
   }
 
@@ -210,11 +239,17 @@ export class AuthService {
 
   /**
    * 签发 access token
-   * payload: { sub: userId, role }，有效期 jwtAccessExpires
+   * payload: { sub: userId, role, organizationId, orgPath }，有效期 jwtAccessExpires
+   * 组织上下文用于读权限的前缀匹配；编辑授权由 AccessControlService 请求时即时查询
    */
-  private signAccessToken(user: User): string {
+  private signAccessToken(user: User, orgContext: OrgContext): string {
     return this.jwtService.sign(
-      { sub: user.id, role: user.role },
+      {
+        sub: user.id,
+        role: user.role,
+        organizationId: orgContext.organizationId,
+        orgPath: orgContext.orgPath,
+      },
       {
         secret: authConfig.jwtSecret,
         expiresIn: authConfig.jwtAccessExpires,
@@ -247,6 +282,7 @@ export class AuthService {
       username: user.username,
       role: user.role,
       status: user.status,
+      organizationId: user.organizationId,
     };
   }
 }
