@@ -34,14 +34,19 @@ jobs:
           - name: backend
             context: ./server
             dockerfile: ./docker/Dockerfile.backend
+            # build-push-action 的 build-contexts 输入（对应 buildx --build-context）
+            # frontend 用 COPY --from=docker 引用 docker 目录，需声明；其余为空
+            build_contexts: ''
           - name: frontend
             context: ./web
             dockerfile: ./docker/Dockerfile.frontend
-            # frontend 的 Dockerfile 用 COPY --from=docker 引用 docker 目录，需附加上下文
-            additional_contexts: 'docker=./docker'
+            # 声明命名上下文 docker 指向 ./docker 目录，供 Dockerfile COPY --from=docker 使用
+            # 注意：build-push-action 的输入名为 build-contexts（非 additional-contexts）
+            build_contexts: 'docker=./docker'
           - name: pdf2html
             context: ./docker/pdf2html
             dockerfile: ./docker/pdf2html/Dockerfile
+            build_contexts: ''
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,8 +78,9 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          # frontend 需附加 docker 上下文（COPY --from=docker ...）
-          additional-contexts: ${{ matrix.additional_contexts }}
+          # 命名构建上下文（buildx --build-context）：frontend 用 docker=./docker
+          # 空字符串时 build-push-action 会忽略该输入
+          build-contexts: ${{ matrix.build_contexts }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
