@@ -61,9 +61,11 @@ LXDOC/
 
 | 文档 | 说明 |
 |---|---|
-| [docs/architecture.md](./docs/architecture.md) | 系统架构、模块划分、数据模型 |
+| [docs/architecture.md](./docs/architecture.md) | 系统架构、模块划分、数据模型、请求流转 |
 | [docs/permissions.md](./docs/permissions.md) | 组织树、RBAC + ACL、读写权限规则 |
 | [docs/document-formats.md](./docs/document-formats.md) | md / docx / pdf 处理与编辑流程 |
+| [docs/frontend.md](./docs/frontend.md) | 前端目录、组件、指令、状态、路由、HTTP 拦截 |
+| [docs/database.md](./docs/database.md) | 数据库 ER 图、表结构、索引、迁移 |
 | [docs/deployment.md](./docs/deployment.md) | 部署、环境变量、OnlyOffice / PDF 工具配置 |
 | [docs/llm.md](./docs/llm.md) | LLM Provider 抽象、GLM5.2 接入、规划路线 |
 | [docs/api-reference.md](./docs/api-reference.md) | 后端接口清单 |
