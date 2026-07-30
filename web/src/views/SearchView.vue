@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { search as searchApi, type SearchResult } from '@/api/search';
+import { sanitizeHtml } from '@/utils/sanitize';
 
 const route = useRoute();
 const router = useRouter();
@@ -176,11 +177,11 @@ onMounted(() => {
             </el-tag>
           </div>
         </div>
-        <!-- 高亮片段：后端已包 <mark>，直接 v-html -->
+        <!-- 高亮片段：后端已包 <mark>，前端 sanitize 后 v-html（防 snippet 含恶意 HTML） -->
         <p
           v-if="item.snippet"
           class="card-snippet"
-          v-html="item.snippet"
+          v-html="sanitizeHtml(item.snippet)"
         />
         <div class="card-footer">
           <span>最后修改：{{ formatTime(item.updatedAt) }}</span>

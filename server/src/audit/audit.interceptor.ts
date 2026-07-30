@@ -6,7 +6,8 @@ import {
   NestInterceptor,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { tap } from 'rxjs/operators';
+import { tap, catchError } from 'rxjs/operators';
+import { throwError } from 'rxjs';
 import { AuditAction } from './audit-log.entity';
 import { AuditService } from './audit.service';
 import { AUDIT_KEY } from '../common/decorators/audit.decorator';
@@ -46,51 +47,64 @@ export class AuditInterceptor implements NestInterceptor {
 
     const req = context.switchToHttp().getRequest();
 
-    // 使用 tap 在 handler 成功返回后触发审计写入，不影响响应内容
-    // 审计写入采用 fire-and-forget：异步执行且 catch 所有异常，确保不影响主流程
-    return next.handle().pipe(
-      tap((result) => {
-        try {
-          const userId = req.user?.id ?? null;
-          // 优先从路径参数取 id（如 /documents/:id），其次从返回值取 id（如 POST /uploads 返回 { id }）
-          const targetId = req.params?.id ?? result?.id ?? null;
+    // 抽取审计写入逻辑，成功/失败均记录（失败用于追溯越权尝试、暴力破解等）
+    const writeAudit = (result: any, error?: any) => {
+      try {
+        const userId = req.user?.id ?? null;
+        // 优先从路径参数取 id，其次从返回值取 id（如 POST /uploads 返回 { id }）
+        const targetId = req.params?.id ?? result?.id ?? null;
 
-          // 构建 target：有 targetType 时记录类型（id 可空），仅有 id 时用 'unknown'
-          let target: { type: string; id: string | null } | undefined;
-          if (meta.targetType) {
-            target = { type: meta.targetType, id: targetId };
-          } else if (targetId) {
-            target = { type: 'unknown', id: targetId };
-          }
-
-          const detail = {
-            method: req.method,
-            path: req.url,
-            params: req.params,
-            body: this.stripSensitive(req.body),
-          };
-
-          // fire-and-forget：不 await，失败在 service 内部已 try/catch
-          // 这里再包一层 catch 兜底，确保任何异常都不影响响应
-          this.auditService
-            .log({
-              userId,
-              action: meta.action,
-              target,
-              detail,
-              req: { ip: req.ip, userAgent: req.headers['user-agent'] },
-            })
-            .catch((err) => {
-              this.logger.error(
-                `审计日志写入失败 action=${meta.action}：${(err as Error).message}`,
-              );
-            });
-        } catch (err) {
-          // 兜底：tap 内同步异常也不应影响响应
-          this.logger.error(
-            `审计拦截器处理异常 action=${meta.action}：${(err as Error).message}`,
-          );
+        let target: { type: string; id: string | null } | undefined;
+        if (meta.targetType) {
+          target = { type: meta.targetType, id: targetId };
+        } else if (targetId) {
+          target = { type: 'unknown', id: targetId };
         }
+
+        const detail: Record<string, any> = {
+          method: req.method,
+          path: req.url,
+          params: req.params,
+          body: this.stripSensitive(req.body),
+        };
+        if (error) {
+          // 失败时记录错误信息（status/message），便于排查越权/暴力破解等
+          detail.success = false;
+          detail.errorStatus = error?.status ?? null;
+          detail.errorMessage =
+            error?.message ?? String(error ?? 'unknown error');
+        } else {
+          detail.success = true;
+        }
+
+        // fire-and-forget：不 await，失败在 service 内部已 try/catch
+        this.auditService
+          .log({
+            userId,
+            action: meta.action,
+            target,
+            detail,
+            req: { ip: req.ip, userAgent: req.headers['user-agent'] },
+          })
+          .catch((err) => {
+            this.logger.error(
+              `审计日志写入失败 action=${meta.action}：${(err as Error).message}`,
+            );
+          });
+      } catch (err) {
+        // 兜底：同步异常也不影响响应
+        this.logger.error(
+          `审计拦截器处理异常 action=${meta.action}：${(err as Error).message}`,
+        );
+      }
+    };
+
+    // 成功：tap 记录；失败：catchError 记录后再原样抛出，不改变错误响应
+    return next.handle().pipe(
+      tap((result) => writeAudit(result)),
+      catchError((err) => {
+        writeAudit(null, err);
+        return throwError(() => err);
       }),
     );
   }

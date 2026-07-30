@@ -57,6 +57,7 @@ import { ArrowLeft, Document, Edit } from '@element-plus/icons-vue';
 import { marked } from 'marked';
 import { getDocument, type Document as Doc } from '@/api/documents';
 import { useAuthStore } from '@/stores/auth';
+import { sanitizeMarkedHtml } from '@/utils/sanitize';
 
 const route = useRoute();
 const router = useRouter();
@@ -73,10 +74,13 @@ marked.setOptions({
 });
 
 // 渲染后的 HTML（marked 引擎，docsify 同款）
+// 安全：marked v18 已移除内置 sanitize，渲染后必须经 sanitizeMarkedHtml 净化，
+// 防止文档内容中的 <script>/<img onerror> 等恶意 HTML 触发存储型 XSS
 const renderedHtml = computed(() => {
   if (!doc.value?.content) return '';
   try {
-    return marked.parse(doc.value.content, { async: false }) as string;
+    const raw = marked.parse(doc.value.content, { async: false }) as string;
+    return sanitizeMarkedHtml(raw);
   } catch (e) {
     console.error('[DocsifyReader] marked 渲染失败', e);
     return `<p style="color:#c00">Markdown 渲染失败</p>`;

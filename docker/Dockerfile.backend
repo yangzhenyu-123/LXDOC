@@ -40,6 +40,10 @@ RUN pnpm build
 ENV UPLOAD_DIR=/app/uploads
 ENV NODE_ENV=production
 
+# uploads 目录需可被 node 用户写入
+RUN mkdir -p /app/uploads && chown -R node:node /app
+USER node
+
 EXPOSE 3000
 
 # 健康检查：探测 /health（controller 已 exclude 全局前缀，路径为 /health）

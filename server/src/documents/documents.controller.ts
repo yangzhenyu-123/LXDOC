@@ -81,8 +81,10 @@ export class DocumentsController {
     return this.service.convertToEditable(id, user);
   }
 
-  // AI 总结：基于原文档文本调用 GLM5.2 生成新的 Markdown 总结文档（读权限即可触发）
+  // AI 总结：基于原文档文本调用 GLM5.2 生成新的 Markdown 总结文档
   // 生成的新文档继承原文档归属空间，采用 Docsify 风格渲染（/read/:docId）
+  // 安全：summarize 会创建新文档并消耗 LLM 资源，需 editor+ 权限（与其它文档创建接口一致）
+  @Roles(UserRole.ADMIN, UserRole.EDITOR)
   @Audit(AuditAction.DOCUMENT_CREATE, 'document')
   @Post('documents/:id/summarize')
   summarize(

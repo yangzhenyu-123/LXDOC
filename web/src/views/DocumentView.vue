@@ -23,6 +23,7 @@ import {
   invalidateFileToken,
 } from '@/api/files';
 import { useAuthStore } from '@/stores/auth';
+import { sanitizeHtml } from '@/utils/sanitize';
 
 const route = useRoute();
 const router = useRouter();
@@ -540,7 +541,7 @@ onMounted(() => {
               <div
                 v-else
                 class="preview-html pdf-layout-html"
-                v-html="pdfLayoutHtml"
+                v-html="sanitizeHtml(pdfLayoutHtml)"
               />
             </div>
             <!-- 翻页预览：pdfjs canvas 渲染原文件 -->
@@ -580,7 +581,7 @@ onMounted(() => {
               <div
                 v-else
                 class="preview-html"
-                v-html="previewHtml"
+                v-html="sanitizeHtml(previewHtml)"
               />
             </div>
           </template>

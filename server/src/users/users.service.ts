@@ -37,7 +37,9 @@ export class UsersService {
 
   /**
    * 启动时若 users 表为空，自动 seed 一个默认管理员
-   * admin@lxdoc.local / lxdoc12345，role=admin
+   * - 开发环境：admin@lxdoc.local / lxdoc12345
+   * - 生产环境：邮箱/密码通过 ADMIN_EMAIL / ADMIN_PASSWORD 环境变量注入，
+   *   未设置则拒绝启动（避免线上使用公开默认凭据被接管）
    */
   async seedIfEmpty(): Promise<void> {
     const count = await this.userRepo.count();
@@ -45,18 +47,33 @@ export class UsersService {
       return;
     }
 
-    const passwordHash = await bcrypt.hash('lxdoc12345', 10);
+    const isProduction = process.env.NODE_ENV === 'production';
+    const email = process.env.ADMIN_EMAIL ?? 'admin@lxdoc.local';
+    const username = 'admin';
+    const password = process.env.ADMIN_PASSWORD ?? 'lxdoc12345';
+    if (isProduction && !process.env.ADMIN_PASSWORD) {
+      // 生产环境必须显式设置管理员密码，拒绝使用公开默认值
+      throw new Error(
+        '[users] 生产环境首次初始化需通过 ADMIN_PASSWORD 环境变量设置管理员密码（同时可用 ADMIN_EMAIL 覆盖默认邮箱）',
+      );
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
     const admin = this.userRepo.create({
-      email: 'admin@lxdoc.local',
-      username: 'admin',
+      email,
+      username,
       passwordHash,
       role: UserRole.ADMIN,
       status: UserStatus.ACTIVE,
     });
     await this.userRepo.save(admin);
-    this.logger.warn(
-      '已创建默认管理员 admin@lxdoc.local / lxdoc12345，请立即修改密码',
-    );
+    if (isProduction) {
+      this.logger.log(`已创建管理员 ${email}（来自 ADMIN_PASSWORD 环境变量）`);
+    } else {
+      this.logger.warn(
+        `已创建默认管理员 ${email} / ${password}，请立即修改密码（生产环境请用 ADMIN_PASSWORD 注入）`,
+      );
+    }
   }
 
   /**

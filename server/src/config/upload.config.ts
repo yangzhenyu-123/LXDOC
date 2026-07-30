@@ -29,4 +29,15 @@ export const uploadConfig = {
     'image/gif',
     'image/webp',
   ],
+  // 允许的图片扩展名白名单（必须与 MIME 一致，防止 svg/html 伪装成图片落盘触发 XSS）
+  allowedImageExtensions: [
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.gif',
+    '.webp',
+  ],
+  // 上传文件大小上限（字节）：文档 50MB，图片 10MB
+  maxDocFileSize: 50 * 1024 * 1024,
+  maxImageFileSize: 10 * 1024 * 1024,
 };

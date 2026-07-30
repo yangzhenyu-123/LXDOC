@@ -22,9 +22,15 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
   async validate(payload: any) {
     // payload: { sub, role, organizationId?, orgPath?, type? }
-    // refresh token 不能用于访问业务 API
+    // refresh token / file token 不能用于访问业务 API：
+    // - refresh token：仅用于换取新 access token
+    // - file token：仅用于 /api/files/:docId/...?token= 访问文件，scope 仅限单文档，
+    //   若放行会被当作低权限 access token 冒充用户（role 为 undefined）
     if (payload.type === 'refresh') {
       throw new UnauthorizedException('不能使用 refresh token 访问 API');
+    }
+    if (payload.type === 'file') {
+      throw new UnauthorizedException('不能使用文件 token 访问业务 API');
     }
     return {
       id: payload.sub,

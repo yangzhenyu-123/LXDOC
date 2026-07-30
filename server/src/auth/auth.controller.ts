@@ -4,6 +4,7 @@ import {
   Patch,
   Post,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginDto } from './dto/login.dto';
@@ -28,6 +29,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Audit(AuditAction.LOGIN)
   @Post('login')
   async login(@Body() dto: LoginDto) {
@@ -35,6 +37,8 @@ export class AuthController {
   }
 
   @Public()
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @Audit(AuditAction.USER_CREATE)
   @Post('register')
   async register(@Body() dto: RegisterDto) {
     return this.authService.register(dto);
@@ -54,6 +58,7 @@ export class AuthController {
   }
 
   // 不加 @Public()，依赖全局 JwtAuthGuard 校验登录态
+  @Audit(AuditAction.USER_UPDATE, 'user')
   @Patch('change-password')
   async changePassword(
     @CurrentUser('id') userId: string,

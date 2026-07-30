@@ -186,20 +186,43 @@ function escapeRegExp(s: string): string {
 /**
  * 在 content 中查找 q 出现位置，截取前后 50 字符并加 <mark>
  * - 未命中返回前 100 字符
+ * - 安全：先对 content 片段做 HTML 转义，再包 <mark>，避免文档内容中的
+ *   <script>/<img onerror> 等恶意 HTML 经搜索 snippet v-html 触发存储型 XSS
  */
 function makeSnippet(content: string | null, q: string): string {
   if (!content) return '';
   const idx = content.toLowerCase().indexOf(q.toLowerCase());
-  if (idx === -1) {
-    return content.slice(0, 100);
-  }
+  // 先截取原始片段
   const start = Math.max(0, idx - 50);
   const end = Math.min(content.length, idx + q.length + 50);
-  const prefix = start > 0 ? '...' : '';
-  const suffix = end < content.length ? '...' : '';
-  const snippet = prefix + content.slice(start, end) + suffix;
-  return snippet.replace(
-    new RegExp(escapeRegExp(q), 'gi'),
+  const snippet =
+    idx === -1
+      ? content.slice(0, 100)
+      : (start > 0 ? '...' : '') +
+        content.slice(start, end) +
+        (end < content.length ? '...' : '');
+  // 整体 HTML 转义（防止 content 内 <script>/<img onerror> 等恶意标签逃逸）
+  const escaped = escapeHtml(snippet);
+  if (idx === -1) {
+    return escaped;
+  }
+  // 转义后再包 <mark>：关键词本身也已转义，需用转义后的值匹配
+  const escapedQ = escapeRegExp(escapeHtml(q));
+  return escaped.replace(
+    new RegExp(escapedQ, 'gi'),
     (m) => `<mark>${m}</mark>`,
   );
+}
+
+/**
+ * HTML 转义：&, <, >, ", '
+ * 用于搜索 snippet 渲染前的净化，防止存储型 XSS
+ */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }

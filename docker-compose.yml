@@ -32,6 +32,9 @@ services:
     # 资源限制，防止单容器耗尽主机资源
     mem_limit: 1g
     cpus: 2
+    # 仅接入 internal 网络，frontend 无法直连 DB
+    networks:
+      - internal
 
   # 后端 NestJS 服务
   backend:
@@ -97,6 +100,10 @@ services:
     # LibreOffice/pdf 转换是内存大户，限制资源避免 OOM 影响其他服务
     mem_limit: 2g
     cpus: 2
+    # 同时接入 default（供 frontend 反代访问）与 internal（访问 postgres）
+    networks:
+      - default
+      - internal
 
   # OnlyOffice Document Server（docx/odt 原格式编辑）
   # AGPL 许可，仅自用/内部部署合规；商业发行需购买商业版
@@ -168,6 +175,13 @@ services:
     restart: unless-stopped
     mem_limit: 512m
     cpus: 1
+
+networks:
+  # default 网络：对外服务（frontend）+ 需被 frontend 访问的后端
+  default:
+  # internal 网络：仅内部服务互通，不对外；postgres 仅接入此网，frontend 无法直连
+  internal:
+    internal: true
 
 volumes:
   postgres-data:

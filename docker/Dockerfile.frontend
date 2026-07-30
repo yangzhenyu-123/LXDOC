@@ -15,7 +15,8 @@ COPY . .
 RUN pnpm build
 
 # Stage 2: nginx 托管 dist/，并反代 /api 到后端
-FROM nginx:alpine
+# 固定版本标签，避免 :latest 不可预期的升级引入 breaking change
+FROM nginx:1.27-alpine
 
 # 拷贝构建产物到 nginx 静态目录
 COPY --from=builder /app/dist /usr/share/nginx/html

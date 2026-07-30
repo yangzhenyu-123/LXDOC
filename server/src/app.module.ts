@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { InjectEntityManager, TypeOrmModule } from '@nestjs/typeorm';
 import { EntityManager } from 'typeorm';
 import { databaseConfig } from './config/database.config';
@@ -29,6 +30,13 @@ import { RolesGuard } from './common/guards/roles.guard';
     ConfigModule.forRoot({
       isGlobal: true,
     }),
+    // 全局限流：默认每分钟 60 次，防暴力破解与滥用。敏感端点（如 login）单独收紧
+    ThrottlerModule.forRoot([
+      {
+        ttl: 60_000,
+        limit: 60,
+      },
+    ]),
     // 异步注入 TypeORM 配置，从 env 读取连接参数
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],
@@ -56,7 +64,9 @@ import { RolesGuard } from './common/guards/roles.guard';
     LlmModule,
   ],
   providers: [
-    // 全局守卫：JwtAuthGuard 先执行（认证），RolesGuard 后执行（授权）
+    // 全局守卫：ThrottlerGuard 限流（最前，防暴力请求穿透认证），
+    // JwtAuthGuard 认证，RolesGuard 授权
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
     // 全局拦截器：AuditInterceptor 在守卫之后、handler 成功返回后记录审计日志

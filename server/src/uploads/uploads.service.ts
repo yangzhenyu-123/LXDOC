@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -17,6 +18,8 @@ import { TextParser } from './parsers/text.parser';
 import { PandocParser } from './parsers/pandoc.parser';
 import { PdfParser } from './parsers/pdf.parser';
 import { getUploadDir, uploadConfig } from '../config/upload.config';
+import { AccessControlService } from '../organizations/access-control.service';
+import { AuthUser } from '../common/decorators/current-user.decorator';
 
 // 扩展名 → DocumentFormat 映射
 const EXT_TO_FORMAT: Record<string, DocumentFormat> = {
@@ -61,6 +64,7 @@ export class UploadsService {
     private readonly textParser: TextParser,
     private readonly pandocParser: PandocParser,
     private readonly pdfParser: PdfParser,
+    private readonly accessControl: AccessControlService,
   ) {}
 
   /**
@@ -84,7 +88,7 @@ export class UploadsService {
   async ingest(
     file: Express.Multer.File,
     categoryId: string,
-    userId: string,
+    user: AuthUser,
     ownerType: DocumentOwnerType = DocumentOwnerType.PERSONAL,
     ownerId?: string,
   ): Promise<Document> {
@@ -119,7 +123,7 @@ export class UploadsService {
     // ownerType/ownerId 决定文档归属（personal=个人空间，group/department=组织空间）
     // contentSource 按格式预设：md/txt=manual，docx/odt=pandoc（索引文本），pdf=pdf_text
     const resolvedOwnerId =
-      ownerType === DocumentOwnerType.PERSONAL ? userId : (ownerId ?? null);
+      ownerType === DocumentOwnerType.PERSONAL ? user.id : (ownerId ?? null);
     if (
       (ownerType === DocumentOwnerType.GROUP ||
         ownerType === DocumentOwnerType.DEPARTMENT) &&
@@ -128,6 +132,24 @@ export class UploadsService {
       throw new BadRequestException(
         `ownerType=${ownerType} 需提供 ownerId（组织节点 id）`,
       );
+    }
+    // 安全：group/department 归属需校验当前用户对该组织节点有写权限，
+    // 防止 editor 向无权访问的组织空间注入文档（跨组织数据投毒）
+    if (
+      (ownerType === DocumentOwnerType.GROUP ||
+        ownerType === DocumentOwnerType.DEPARTMENT) &&
+      resolvedOwnerId
+    ) {
+      const canWriteOrg = await this.accessControl.canWrite(user, {
+        ownerType,
+        ownerId: resolvedOwnerId,
+        createdBy: user.id,
+      });
+      if (!canWriteOrg) {
+        throw new ForbiddenException(
+          `无权向组织节点 ${resolvedOwnerId} 上传文档`,
+        );
+      }
     }
     const initialContentSource =
       format === DocumentFormat.PDF
@@ -142,7 +164,7 @@ export class UploadsService {
       format,
       originalPath: null,
       version: 1,
-      createdBy: userId,
+      createdBy: user.id,
       ownerType,
       ownerId: resolvedOwnerId,
       contentSource: initialContentSource,
@@ -268,11 +290,15 @@ export class UploadsService {
     const targetDir = path.join(uploadDir, 'images', scope);
     await fs.mkdir(targetDir, { recursive: true });
 
-    // 取扩展名：优先 originalname 的 ext，否则按 MIME 推断
-    const extFromName = path.extname(file.originalname);
-    const ext =
-      extFromName ||
-      `.${(file.mimetype.split('/')[1] || 'png').toLowerCase()}`;
+    // 安全：扩展名按 MIME 严格映射（不信任 originalname 的扩展名），
+    // 防止 svg/html 伪装成图片落盘后被浏览器以可执行 Content-Type 渲染（XSS）
+    const mimeToExt: Record<string, string> = {
+      'image/png': '.png',
+      'image/jpeg': '.jpg',
+      'image/gif': '.gif',
+      'image/webp': '.webp',
+    };
+    const ext = mimeToExt[file.mimetype] ?? '.png';
     const filename = `${randomUUID()}${ext}`;
     const absPath = path.join(targetDir, filename);
     await fs.writeFile(absPath, file.buffer);

@@ -37,7 +37,12 @@ export class UploadsController {
    */
   @Post()
   @Audit(AuditAction.DOCUMENT_CREATE, 'document')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(
+    FileInterceptor('file', {
+      // 限制单文件大小，防止超大上传耗尽内存（multer 默认 memory storage 缓冲到内存）
+      limits: { fileSize: uploadConfig.maxDocFileSize },
+    }),
+  )
   async uploadDocument(
     @UploadedFile() file: Express.Multer.File | undefined,
     @Body() dto: UploadDocumentDto,
@@ -55,7 +60,7 @@ export class UploadsController {
     const doc = await this.service.ingest(
       file,
       dto.categoryId,
-      user.id,
+      user,
       dto.ownerType,
       dto.ownerId,
     );
@@ -78,7 +83,12 @@ export class UploadsController {
    * 返回 { url, filename }
    */
   @Post('image')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(
+    FileInterceptor('file', {
+      // 图片单文件大小限制
+      limits: { fileSize: uploadConfig.maxImageFileSize },
+    }),
+  )
   async uploadImage(
     @UploadedFile() file: Express.Multer.File | undefined,
     @Body() dto: UploadImageDto,
