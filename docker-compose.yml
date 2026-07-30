@@ -1,0 +1,78 @@
+# LXDOC 企业知识库一键编排
+# 启动：docker compose up -d
+# 前端：http://localhost:8080  后端 API：http://localhost:3000/api  PostgreSQL：5432
+services:
+  # PostgreSQL 数据库
+  postgres:
+    image: postgres:16-alpine
+    container_name: lxdoc-postgres
+    environment:
+      POSTGRES_USER: lxdoc
+      POSTGRES_PASSWORD: lxdoc
+      POSTGRES_DB: lxdoc
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lxdoc -d lxdoc"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # 后端 NestJS 服务
+  backend:
+    build:
+      context: ./server
+      dockerfile: ../docker/Dockerfile.backend
+    container_name: lxdoc-backend
+    environment:
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: lxdoc
+      DB_PASS: lxdoc
+      DB_NAME: lxdoc
+      UPLOAD_DIR: /app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      # 上传文件目录挂载到宿主机，便于持久化与查看
+      - ./uploads:/app/uploads
+    ports:
+      - "3000:3000"
+    healthcheck:
+      # 使用 node 内置 http 模块探活，避免依赖 curl/wget
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # 前端 nginx 服务
+  frontend:
+    build:
+      context: ./web
+      dockerfile: ../docker/Dockerfile.frontend
+      # 注入 docker 目录为命名上下文，供 Dockerfile COPY --from=docker nginx.conf 使用
+      additional_contexts:
+        docker: ./docker
+    container_name: lxdoc-frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+    healthcheck:
+      # nginx:alpine 自带 wget
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

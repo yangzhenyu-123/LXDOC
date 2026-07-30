@@ -1,0 +1,143 @@
+import client from './client';
+
+// 文档格式，与后端 DocumentFormat 枚举对齐
+export type DocumentFormat = 'md' | 'txt' | 'docx' | 'odt' | 'pdf';
+
+// 文档实体，与后端 Document 实体对齐
+export interface Document {
+  id: string;
+  categoryId: string;
+  title: string;
+  content: string | null;
+  format: DocumentFormat;
+  originalPath: string | null;
+  version: number;
+  author: string;
+  tags: string[];
+  userId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// 文档版本列表项（不含 content）
+export interface DocumentVersion {
+  id: string;
+  version: number;
+  createdAt: string;
+}
+
+// 单个版本内容响应
+export interface DocumentVersionContent {
+  version: number;
+  content: string;
+  createdAt: string;
+}
+
+// 分类下文档列表项（不含 content）
+export interface DocumentListItem {
+  id: string;
+  title: string;
+  format: DocumentFormat;
+  version: number;
+  tags: string[];
+  updatedAt: string;
+}
+
+// 更新文档请求体
+export interface UpdateDocumentPayload {
+  title?: string;
+  content?: string;
+  tags?: string[];
+}
+
+/**
+ * 获取单个文档（含 content）
+ * GET /documents/:id
+ */
+export function getDocument(id: string): Promise<Document> {
+  return client.get<Document, Document>(`/documents/${id}`);
+}
+
+/**
+ * 获取 docx/odt 文档的 HTML 预览片段
+ * GET /documents/:id/preview
+ * 返回 { html: string }
+ */
+export async function getPreviewHtml(id: string): Promise<string> {
+  const res = await client.get<{ html: string }, { html: string }>(
+    `/documents/${id}/preview`,
+  );
+  return res?.html ?? '';
+}
+
+/**
+ * 更新文档（创建版本快照 + version + 1）
+ * PUT /documents/:id
+ */
+export function updateDocument(
+  id: string,
+  payload: UpdateDocumentPayload,
+): Promise<Document> {
+  return client.put<Document, Document>(`/documents/${id}`, payload);
+}
+
+/**
+ * 列出文档所有版本（按 version DESC）
+ * GET /documents/:id/versions
+ */
+export function listVersions(id: string): Promise<DocumentVersion[]> {
+  return client.get<DocumentVersion[], DocumentVersion[]>(
+    `/documents/${id}/versions`,
+  );
+}
+
+/**
+ * 获取指定版本内容
+ * GET /documents/:id/versions/:v
+ */
+export function getVersion(
+  id: string,
+  version: number,
+): Promise<DocumentVersionContent> {
+  return client.get<DocumentVersionContent, DocumentVersionContent>(
+    `/documents/${id}/versions/${version}`,
+  );
+}
+
+/**
+ * 回滚到指定版本
+ * POST /documents/:id/rollback/:v
+ */
+export function rollback(id: string, version: number): Promise<Document> {
+  return client.post<Document, Document>(
+    `/documents/${id}/rollback/${version}`,
+  );
+}
+
+/**
+ * 列出某分类下的所有文档
+ * GET /categories/:id/documents?includeChildren=true
+ * includeChildren=true 时递归包含子分类
+ */
+export function listByCategory(
+  categoryId: string,
+  includeChildren = false,
+): Promise<DocumentListItem[]> {
+  return client.get<DocumentListItem[], DocumentListItem[]>(
+    `/categories/${categoryId}/documents`,
+    { params: includeChildren ? { includeChildren: 'true' } : {} },
+  );
+}
+
+/**
+ * 列出最近更新的 N 篇文档
+ * GET /documents/recent?limit=
+ */
+export function getRecentDocuments(
+  limit = 10,
+): Promise<DocumentListItem[]> {
+  return client.get<DocumentListItem[], DocumentListItem[]>(
+    '/documents/recent',
+    { params: { limit } },
+  );
+}

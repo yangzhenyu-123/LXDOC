@@ -1,0 +1,659 @@
+<script setup lang="ts">
+import { computed, onMounted, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import { ElMessage, ElMessageBox } from 'element-plus';
+import MarkdownEditor from '@/components/MarkdownEditor.vue';
+import PdfViewer from '@/components/PdfViewer.vue';
+import {
+  getDocument,
+  getPreviewHtml,
+  listVersions,
+  rollback as rollbackApi,
+  updateDocument,
+  type Document,
+  type DocumentVersion,
+} from '@/api/documents';
+
+const route = useRoute();
+const router = useRouter();
+const docId = computed(() => String(route.params.docId ?? ''));
+
+// 文档实体
+const doc = ref<Document | null>(null);
+// 版本列表
+const versions = ref<DocumentVersion[]>([]);
+// 选中的版本号（用于回滚）
+const selectedVersion = ref<number | null>(null);
+
+// 加载 / 错误状态
+const loading = ref(false);
+const loadError = ref<string | null>(null);
+// 保存中状态
+const saving = ref(false);
+// 回滚中状态
+const rollbackLoading = ref(false);
+
+// 当前编辑态：标题、内容、标签
+const titleInput = ref('');
+const contentInput = ref('');
+const tagsInput = ref<string[]>([]);
+// 新标签输入
+const newTag = ref('');
+
+// 最近一次保存的快照，用于检测是否有变更
+const savedSnapshot = ref<{ title: string; content: string; tags: string[] }>({
+  title: '',
+  content: '',
+  tags: [],
+});
+
+// 是否为可编辑文档格式（md/txt/docx/odt）
+const isEditable = computed(() => {
+  const f = doc.value?.format;
+  return f === 'md' || f === 'txt' || f === 'docx' || f === 'odt';
+});
+
+// 是否为 PDF 格式
+const isPdf = computed(() => doc.value?.format === 'pdf');
+
+// 是否为 docx/odt（可编辑 + 可原版预览）
+const isDocLike = computed(() => {
+  const f = doc.value?.format;
+  return f === 'docx' || f === 'odt';
+});
+
+// PDF 预览 URL：originalPath → /uploads/<originalPath>
+const pdfUrl = computed(() =>
+  doc.value?.originalPath ? `/uploads/${doc.value.originalPath}` : '',
+);
+
+// docx/odt 模式切换：edit（编辑） / preview（原版预览）
+const docMode = ref<'edit' | 'preview'>('edit');
+// 原版预览 HTML
+const previewHtml = ref('');
+const previewLoading = ref(false);
+const previewError = ref<string | null>(null);
+
+// 检测是否有未保存变更
+function checkDirty(): boolean {
+  if (!doc.value) return false;
+  return (
+    titleInput.value !== savedSnapshot.value.title ||
+    contentInput.value !== savedSnapshot.value.content ||
+    JSON.stringify(tagsInput.value.slice().sort()) !==
+      JSON.stringify(savedSnapshot.value.tags.slice().sort())
+  );
+}
+
+// 版本下拉显示文本
+function versionLabel(v: DocumentVersion): string {
+  return `v${v.version} · ${formatTime(v.createdAt)}`;
+}
+
+// 时间格式化
+function formatTime(s: string | Date): string {
+  if (!s) return '';
+  const d = typeof s === 'string' ? new Date(s) : s;
+  if (Number.isNaN(d.getTime())) return String(s);
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+
+/**
+ * 加载文档详情
+ */
+async function loadDocument() {
+  if (!docId.value) {
+    loadError.value = '缺少文档 id';
+    return;
+  }
+  loading.value = true;
+  loadError.value = null;
+  try {
+    const data = await getDocument(docId.value);
+    doc.value = data;
+    titleInput.value = data.title ?? '';
+    contentInput.value = data.content ?? '';
+    tagsInput.value = Array.isArray(data.tags) ? [...data.tags] : [];
+    savedSnapshot.value = {
+      title: data.title ?? '',
+      content: data.content ?? '',
+      tags: Array.isArray(data.tags) ? [...data.tags] : [],
+    };
+    selectedVersion.value = data.version;
+    // 重置 docx/odt 预览状态
+    docMode.value = 'edit';
+    previewHtml.value = '';
+    previewError.value = null;
+    await loadVersions();
+  } catch (err: any) {
+    const msg =
+      err?.response?.data?.message ?? err?.message ?? '加载文档失败';
+    loadError.value = msg;
+  } finally {
+    loading.value = false;
+  }
+}
+
+/**
+ * 加载版本列表
+ */
+async function loadVersions() {
+  try {
+    versions.value = (await listVersions(docId.value)) ?? [];
+  } catch {
+    // 版本加载失败不阻断主流程
+    versions.value = [];
+  }
+}
+
+/**
+ * 添加新标签
+ */
+function addTag() {
+  const t = newTag.value.trim();
+  if (!t) return;
+  if (tagsInput.value.includes(t)) {
+    ElMessage.warning('该标签已存在');
+    return;
+  }
+  tagsInput.value.push(t);
+  newTag.value = '';
+}
+
+// 删除标签
+function removeTag(t: string) {
+  tagsInput.value = tagsInput.value.filter((x) => x !== t);
+}
+
+/**
+ * 保存文档
+ * - 若内容未变化，提示并跳过
+ * - 调用 updateDocument，成功后刷新版本下拉
+ * - PDF 模式下只更新 title（content 保持 null）
+ */
+async function save() {
+  if (!doc.value) return;
+  // PDF 模式下走 saveTitle 逻辑
+  if (isPdf.value) {
+    await saveTitle();
+    return;
+  }
+  if (!checkDirty()) {
+    ElMessage.info('内容未变化，无需保存');
+    return;
+  }
+  saving.value = true;
+  try {
+    const updated = await updateDocument(docId.value, {
+      title: titleInput.value,
+      content: contentInput.value,
+      tags: tagsInput.value,
+    });
+    doc.value = updated;
+    titleInput.value = updated.title ?? '';
+    contentInput.value = updated.content ?? '';
+    tagsInput.value = Array.isArray(updated.tags) ? [...updated.tags] : [];
+    savedSnapshot.value = {
+      title: updated.title ?? '',
+      content: updated.content ?? '',
+      tags: Array.isArray(updated.tags) ? [...updated.tags] : [],
+    };
+    selectedVersion.value = updated.version;
+    ElMessage.success('保存成功');
+    await loadVersions();
+  } catch (err: any) {
+    const msg =
+      err?.response?.data?.message ?? err?.message ?? '保存失败';
+    ElMessage.error(`保存失败：${msg}`);
+  } finally {
+    saving.value = false;
+  }
+}
+
+/**
+ * 仅保存标题（PDF 模式）
+ * PUT 时只更新 title，content 保持 null
+ */
+async function saveTitle() {
+  if (!doc.value) return;
+  if (titleInput.value === savedSnapshot.value.title) {
+    ElMessage.info('标题未变化');
+    return;
+  }
+  saving.value = true;
+  try {
+    const updated = await updateDocument(docId.value, {
+      title: titleInput.value,
+    });
+    doc.value = updated;
+    titleInput.value = updated.title ?? '';
+    savedSnapshot.value = {
+      title: updated.title ?? '',
+      content: savedSnapshot.value.content,
+      tags: savedSnapshot.value.tags,
+    };
+    selectedVersion.value = updated.version;
+    ElMessage.success('保存成功');
+    await loadVersions();
+  } catch (err: any) {
+    const msg =
+      err?.response?.data?.message ?? err?.message ?? '保存失败';
+    ElMessage.error(`保存失败：${msg}`);
+  } finally {
+    saving.value = false;
+  }
+}
+
+/**
+ * 加载 docx/odt 原版预览 HTML
+ */
+async function loadPreviewHtml() {
+  if (!docId.value) return;
+  previewLoading.value = true;
+  previewError.value = null;
+  try {
+    previewHtml.value = await getPreviewHtml(docId.value);
+  } catch (err: any) {
+    const msg =
+      err?.response?.data?.message ?? err?.message ?? '加载预览失败';
+    previewError.value = msg;
+    previewHtml.value = '';
+  } finally {
+    previewLoading.value = false;
+  }
+}
+
+// docx/odt 模式切换：进入预览模式时拉取 HTML
+watch(docMode, (mode) => {
+  if (mode === 'preview' && !previewHtml.value && !previewError.value) {
+    loadPreviewHtml();
+  }
+});
+
+/**
+ * 回滚到选中版本
+ */
+async function rollback() {
+  if (!doc.value) return;
+  if (selectedVersion.value == null) {
+    ElMessage.warning('请先选择要回滚的版本');
+    return;
+  }
+  const targetVersion = selectedVersion.value;
+  try {
+    await ElMessageBox.confirm(
+      `确认回滚到版本 v${targetVersion}？当前未保存内容将作为新版本保存。`,
+      '回滚确认',
+      {
+        confirmButtonText: '确认回滚',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    );
+  } catch {
+    // 用户取消
+    return;
+  }
+
+  rollbackLoading.value = true;
+  try {
+    const updated = await rollbackApi(docId.value, targetVersion);
+    doc.value = updated;
+    titleInput.value = updated.title ?? '';
+    contentInput.value = updated.content ?? '';
+    tagsInput.value = Array.isArray(updated.tags) ? [...updated.tags] : [];
+    savedSnapshot.value = {
+      title: updated.title ?? '',
+      content: updated.content ?? '',
+      tags: Array.isArray(updated.tags) ? [...updated.tags] : [],
+    };
+    selectedVersion.value = updated.version;
+    ElMessage.success('回滚成功');
+    await loadVersions();
+  } catch (err: any) {
+    const msg =
+      err?.response?.data?.message ?? err?.message ?? '回滚失败';
+    ElMessage.error(`回滚失败：${msg}`);
+  } finally {
+    rollbackLoading.value = false;
+  }
+}
+
+// 返回上一页
+function goBack() {
+  router.back();
+}
+
+onMounted(() => {
+  loadDocument();
+});
+</script>
+
+<template>
+  <div class="document-view">
+    <!-- 顶部工具栏 -->
+    <div class="toolbar">
+      <el-button @click="goBack">
+        <el-icon class="el-icon--left"><ArrowLeft /></el-icon>
+        返回
+      </el-button>
+      <el-input
+        v-model="titleInput"
+        class="title-input"
+        placeholder="文档标题"
+        clearable
+      />
+      <!-- PDF 模式下隐藏主保存按钮，改为「保存标题」 -->
+      <el-button
+        v-if="!isPdf"
+        type="primary"
+        :loading="saving"
+        :disabled="!isEditable"
+        @click="save"
+      >
+        保存
+      </el-button>
+      <el-button
+        v-else
+        type="primary"
+        :loading="saving"
+        @click="saveTitle"
+      >
+        保存标题
+      </el-button>
+      <el-select
+        v-model="selectedVersion"
+        placeholder="选择版本"
+        class="version-select"
+        :disabled="!versions.length"
+      >
+        <el-option
+          v-for="v in versions"
+          :key="v.id"
+          :value="v.version"
+          :label="versionLabel(v)"
+        />
+      </el-select>
+      <el-button
+        :loading="rollbackLoading"
+        :disabled="selectedVersion == null"
+        @click="rollback"
+      >
+        回滚到此版本
+      </el-button>
+    </div>
+
+    <!-- 主体区：loading / error / 内容 -->
+    <div class="body">
+      <div v-if="loading" class="loading-state" v-loading="true" />
+      <div v-else-if="loadError" class="error-state">
+        <el-alert
+          :title="loadError"
+          type="error"
+          show-icon
+          :closable="false"
+        />
+      </div>
+      <div v-else-if="doc" class="content-wrapper">
+        <!-- 左侧主区 -->
+        <div class="main">
+          <!-- PDF：直接用 PdfViewer 渲染原文件 -->
+          <PdfViewer
+            v-if="isPdf"
+            :src="pdfUrl"
+          />
+          <!-- docx/odt：编辑 / 原版预览 切换 -->
+          <template v-else-if="isDocLike">
+            <el-radio-group v-model="docMode" class="doc-mode-switch">
+              <el-radio-button value="edit">编辑</el-radio-button>
+              <el-radio-button value="preview">原版预览</el-radio-button>
+            </el-radio-group>
+            <MarkdownEditor
+              v-if="docMode === 'edit'"
+              v-model="contentInput"
+              :doc-id="docId"
+              @save="save"
+            />
+            <div v-else class="preview-wrap" v-loading="previewLoading">
+              <el-alert
+                v-if="previewError"
+                :title="previewError"
+                type="error"
+                show-icon
+                :closable="false"
+              />
+              <div
+                v-else
+                class="preview-html"
+                v-html="previewHtml"
+              />
+            </div>
+          </template>
+          <!-- md/txt：直接编辑 -->
+          <MarkdownEditor
+            v-else-if="isEditable"
+            v-model="contentInput"
+            :doc-id="docId"
+            @save="save"
+          />
+          <el-empty v-else :description="`暂不支持的格式：${doc.format}`" />
+        </div>
+
+        <!-- 右侧侧栏 -->
+        <el-aside width="280px" class="sidebar">
+          <!-- 元信息卡片 -->
+          <el-card class="meta-card" shadow="never">
+            <template #header>
+              <span class="card-title">元信息</span>
+            </template>
+            <ul class="meta-list">
+              <li><span class="meta-key">作者</span><span class="meta-val">{{ doc.author || '-' }}</span></li>
+              <li><span class="meta-key">当前版本</span><span class="meta-val">v{{ doc.version }}</span></li>
+              <li><span class="meta-key">格式</span><span class="meta-val">{{ doc.format }}</span></li>
+              <li><span class="meta-key">创建时间</span><span class="meta-val">{{ formatTime(doc.createdAt) }}</span></li>
+              <li><span class="meta-key">最后修改</span><span class="meta-val">{{ formatTime(doc.updatedAt) }}</span></li>
+            </ul>
+          </el-card>
+
+          <!-- 标签编辑 -->
+          <el-card class="meta-card" shadow="never">
+            <template #header>
+              <span class="card-title">标签</span>
+            </template>
+            <div class="tags-box">
+              <el-tag
+                v-for="t in tagsInput"
+                :key="t"
+                class="tag-item"
+                closable
+                @close="removeTag(t)"
+              >
+                {{ t }}
+              </el-tag>
+            </div>
+            <el-input
+              v-model="newTag"
+              placeholder="输入标签后回车添加"
+              class="tag-input"
+              @keyup.enter="addTag"
+            />
+          </el-card>
+
+          <!-- 版本历史 -->
+          <el-card class="meta-card" shadow="never">
+            <template #header>
+              <span class="card-title">版本历史</span>
+            </template>
+            <el-select
+              v-model="selectedVersion"
+              placeholder="选择版本"
+              class="version-select-full"
+              :disabled="!versions.length"
+            >
+              <el-option
+                v-for="v in versions"
+                :key="v.id"
+                :value="v.version"
+                :label="versionLabel(v)"
+              />
+            </el-select>
+            <el-button
+              class="rollback-btn"
+              :loading="rollbackLoading"
+              :disabled="selectedVersion == null"
+              @click="rollback"
+            >
+              回滚到此版本
+            </el-button>
+          </el-card>
+        </el-aside>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.document-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #f5f7fa;
+}
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: #fff;
+  border-bottom: 1px solid #e4e7ed;
+}
+.title-input {
+  flex: 1;
+  max-width: 480px;
+}
+.version-select {
+  width: 220px;
+}
+.body {
+  flex: 1;
+  overflow: hidden;
+  padding: 16px;
+}
+.loading-state,
+.error-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+.content-wrapper {
+  display: flex;
+  gap: 16px;
+  height: 100%;
+}
+.main {
+  flex: 1;
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+  padding: 12px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.doc-mode-switch {
+  margin-bottom: 12px;
+  align-self: flex-start;
+}
+.preview-wrap {
+  flex: 1;
+  overflow: auto;
+  padding: 8px;
+}
+.preview-html {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #303133;
+}
+.preview-html :deep(img) {
+  max-width: 100%;
+  height: auto;
+}
+.preview-html :deep(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+}
+.preview-html :deep(th),
+.preview-html :deep(td) {
+  border: 1px solid #dcdfe6;
+  padding: 6px 10px;
+  text-align: left;
+}
+.preview-html :deep(pre) {
+  background: #f5f7fa;
+  padding: 10px;
+  border-radius: 4px;
+  overflow: auto;
+}
+.preview-html :deep(code) {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+}
+.meta-card {
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+}
+.card-title {
+  font-weight: 600;
+}
+.meta-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.meta-list li {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 13px;
+  border-bottom: 1px dashed #ebeef5;
+}
+.meta-list li:last-child {
+  border-bottom: none;
+}
+.meta-key {
+  color: #909399;
+}
+.meta-val {
+  color: #303133;
+  text-align: right;
+  max-width: 60%;
+  word-break: break-all;
+}
+.tags-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+  min-height: 24px;
+}
+.tag-item {
+  margin: 0;
+}
+.tag-input {
+  width: 100%;
+}
+.version-select-full {
+  width: 100%;
+  margin-bottom: 8px;
+}
+.rollback-btn {
+  width: 100%;
+}
+</style>

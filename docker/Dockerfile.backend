@@ -1,0 +1,29 @@
+# LXDOC 后端镜像：基于 node:20-bookworm-slim，apt 安装 pandoc 用于 DOCX/ODT 解析
+FROM node:20-bookworm-slim
+
+# 安装 pandoc（Debian 仓库可直接安装）
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pandoc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 先拷贝依赖清单，利用 Docker 层缓存
+COPY package.json pnpm-lock.yaml* ./
+
+# 安装 pnpm 并装依赖（含 devDependencies，构建期需要 nest/cli）
+RUN npm install -g pnpm && pnpm install --prod=false
+
+# 拷贝源码
+COPY . .
+
+# 构建产物到 dist/
+RUN pnpm build
+
+ENV UPLOAD_DIR=/app/uploads
+ENV NODE_ENV=production
+
+EXPOSE 3000
+
+# 运行编译后的入口
+CMD ["node", "dist/main.js"]

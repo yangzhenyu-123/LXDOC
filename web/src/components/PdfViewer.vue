@@ -1,0 +1,212 @@
+<script setup lang="ts">
+import { onMounted, ref, watch } from 'vue';
+// pdfjs-dist v4+ 为 ESM 包，整体导入
+import * as pdfjsLib from 'pdfjs-dist';
+
+// 设置 worker：Vite 项目用 new URL 形式，构建时会单独打包 worker chunk
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url,
+).href;
+
+const props = defineProps<{
+  // pdf 文件 URL，例如 /uploads/original/<docId>/<file> 或绝对路径
+  src: string;
+}>();
+
+// 渲染画布引用
+const canvasRef = ref<HTMLCanvasElement | null>(null);
+
+// 加载 / 渲染状态
+const loading = ref(true);
+const error = ref<string | null>(null);
+
+// 当前页码（1-based）与总页数
+const currentPage = ref(1);
+const totalPages = ref(0);
+
+// 缩放比例，范围 0.5~3，步进 0.25
+const scale = ref(1);
+
+// 已加载的 pdf 文档代理
+let pdfDoc: any = null;
+
+/**
+ * 渲染当前页到 canvas
+ */
+async function renderPage() {
+  if (!pdfDoc) return;
+  try {
+    const page = await pdfDoc.getPage(currentPage.value);
+    const viewport = page.getViewport({ scale: scale.value });
+    const canvas = canvasRef.value;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    await page.render({ canvasContext: ctx, viewport }).promise;
+  } catch (err) {
+    // 渲染失败仅记录，不阻断
+    console.error('[PdfViewer] 渲染失败', err);
+  }
+}
+
+/**
+ * 加载 pdf 文档
+ */
+async function loadPdf() {
+  loading.value = true;
+  error.value = null;
+  try {
+    pdfDoc = await pdfjsLib.getDocument(props.src).promise;
+    totalPages.value = pdfDoc.numPages;
+    currentPage.value = 1;
+    await renderPage();
+  } catch (err: any) {
+    error.value = err?.message ?? '加载 PDF 失败';
+  } finally {
+    loading.value = false;
+  }
+}
+
+// 上一页
+function prevPage() {
+  if (currentPage.value <= 1) return;
+  currentPage.value -= 1;
+}
+
+// 下一页
+function nextPage() {
+  if (currentPage.value >= totalPages.value) return;
+  currentPage.value += 1;
+}
+
+// 缩小
+function zoomOut() {
+  scale.value = Math.max(0.5, Math.round((scale.value - 0.25) * 100) / 100);
+}
+
+// 放大
+function zoomIn() {
+  scale.value = Math.min(3, Math.round((scale.value + 0.25) * 100) / 100);
+}
+
+// 下载：直接打开原 URL
+function download() {
+  window.open(props.src, '_blank');
+}
+
+// 页码变化时重新渲染
+watch(currentPage, () => {
+  renderPage();
+});
+
+// 缩放变化时重新渲染
+watch(scale, () => {
+  renderPage();
+});
+
+// src 变化时重新加载
+watch(
+  () => props.src,
+  (newSrc) => {
+    if (newSrc) loadPdf();
+  },
+);
+
+onMounted(() => {
+  if (props.src) loadPdf();
+});
+</script>
+
+<template>
+  <div class="pdf-viewer">
+    <!-- 工具栏 -->
+    <div class="toolbar">
+      <el-button-group>
+        <el-button
+          :disabled="currentPage <= 1"
+          size="small"
+          @click="prevPage"
+        >
+          上一页
+        </el-button>
+        <el-button
+          :disabled="currentPage >= totalPages"
+          size="small"
+          @click="nextPage"
+        >
+          下一页
+        </el-button>
+      </el-button-group>
+      <span class="page-info">
+        {{ currentPage }} / {{ totalPages || '-' }}
+      </span>
+      <el-button-group>
+        <el-button size="small" @click="zoomOut">-</el-button>
+        <el-button size="small" disabled>{{ Math.round(scale * 100) }}%</el-button>
+        <el-button size="small" @click="zoomIn">+</el-button>
+      </el-button-group>
+      <el-button size="small" @click="download">
+        <el-icon class="el-icon--left"><Download /></el-icon>
+        下载
+      </el-button>
+    </div>
+
+    <!-- 主体渲染区 -->
+    <div class="canvas-wrap" v-loading="loading">
+      <el-alert
+        v-if="error"
+        :title="error"
+        type="error"
+        show-icon
+        :closable="false"
+        class="error-alert"
+      />
+      <canvas v-show="!error" ref="canvasRef" class="pdf-canvas" />
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.pdf-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #f5f7fa;
+}
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #fff;
+  border-bottom: 1px solid #e4e7ed;
+  flex-wrap: wrap;
+}
+.page-info {
+  font-size: 13px;
+  color: #606266;
+  min-width: 80px;
+  text-align: center;
+}
+.canvas-wrap {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px;
+}
+.error-alert {
+  width: 100%;
+  max-width: 800px;
+  margin-bottom: 12px;
+}
+.pdf-canvas {
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  max-width: 100%;
+}
+</style>

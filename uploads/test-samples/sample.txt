@@ -1,0 +1,21 @@
+LXDOC 测试样本纯文本文件
+============================
+
+本文件用于验证 LXDOC 知识库对 .txt 纯文本文件的上传与解析能力。
+
+按照 spec 要求：
+- 上传 .txt 后系统直接读取文本作为正文，存入 document.content
+- 文件名作为标题，可在编辑器内修改
+
+纯文本内容示例：
+
+LXDOC 企业知识库支持 Markdown、TXT、DOCX、ODT、PDF 五种文档格式入库。
+分类树包含三类顶层分类：技术文档、解决方案、Bug 分析报告。
+Markdown 编辑器基于 Vditor 实现，支持图片粘贴与拖拽上传。
+全文检索基于 PostgreSQL pg_trgm 扩展，标题命中优先返回。
+PDF 文档通过 pdfjs 在线渲染，支持翻页与缩放。
+DOCX/ODT 通过 Pandoc 转 HTML 后渲染，内嵌图片可见。
+
+关键词测试：知识库、分类树、Pandoc、pdfjs、Vditor、pg_trgm。
+
+请在搜索框输入以上关键词验证高亮显示。
