@@ -7,6 +7,8 @@ import {
   type AuthUser,
   type RegisterDto,
 } from '@/api/auth';
+// 仅引入类型与重置函数，规避 client ↔ store 循环依赖（client 动态 import store）
+import { resetRefreshFailure } from '@/api/client';
 
 // localStorage 持久化键
 const LS_ACCESS_TOKEN = 'lxdoc_access_token';
@@ -48,6 +50,8 @@ export const useAuthStore = defineStore('auth', {
       this.refreshToken = res.refreshToken;
       this.user = res.user;
       this.persist();
+      // 新登录重置 client 的 refresh 失败标记
+      resetRefreshFailure();
       return res.user;
     },
 
@@ -60,6 +64,7 @@ export const useAuthStore = defineStore('auth', {
       this.refreshToken = res.refreshToken;
       this.user = res.user;
       this.persist();
+      resetRefreshFailure();
       return res.user;
     },
 
@@ -125,7 +130,7 @@ export const useAuthStore = defineStore('auth', {
     },
 
     /**
-     * 刷新令牌：成功更新 accessToken；失败抛出
+     * 刷新令牌：后端轮换，成功后同时更新 access + 新 refresh；失败抛出
      */
     async refresh(): Promise<string> {
       if (!this.refreshToken) {
@@ -133,7 +138,11 @@ export const useAuthStore = defineStore('auth', {
       }
       const res = await refreshApi(this.refreshToken);
       this.accessToken = res.accessToken;
-      localStorage.setItem(LS_ACCESS_TOKEN, res.accessToken);
+      // 后端轮换返回新 refresh token，需一并持久化
+      if (res.refreshToken) {
+        this.refreshToken = res.refreshToken;
+      }
+      this.persist();
       return res.accessToken;
     },
 

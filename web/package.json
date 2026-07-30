@@ -13,6 +13,7 @@
     "@element-plus/icons-vue": "^2.3.1",
     "axios": "^1.6.7",
     "element-plus": "^2.5.6",
+    "marked": "^18.0.7",
     "pdfjs-dist": "^4.0.379",
     "pinia": "^2.1.7",
     "vditor": "^3.9.9",

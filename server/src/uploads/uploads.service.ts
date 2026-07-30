@@ -31,6 +31,22 @@ const EXT_TO_FORMAT: Record<string, DocumentFormat> = {
 // 允许的扩展名白名单（用于 controller 校验）
 export const ALLOWED_EXTENSIONS = uploadConfig.allowedDocExtensions;
 
+/**
+ * 清洗 multer 给的 originalname，防止路径穿越：
+ * - 取 basename，剥离目录
+ * - 替换 .. / 空字节 等危险字符
+ * 用于落盘文件名拼接，避免写入到 original/<docId>/ 之外
+ */
+function sanitizeFilename(name: string): string {
+  // basename 防穿越，并去除首尾空白
+  const base = path.basename(name ?? '').trim();
+  // 替换路径穿越/控制字符为下划线
+  return base
+    .replace(/\.\./g, '_')
+    .replace(/[\0\r\n]/g, '_')
+    .replace(/[\\/]/g, '_');
+}
+
 @Injectable()
 export class UploadsService {
   private readonly logger = new Logger(UploadsService.name);
@@ -91,10 +107,12 @@ export class UploadsService {
       throw new NotFoundException(`分类 ${categoryId} 不存在`);
     }
 
+    // 清洗文件名，防止路径穿越（originalname 来自 multer，未经清洗）
+    const safeOriginalName = sanitizeFilename(file.originalname);
     // 标题先用文件名去 ext
-    const ext = path.extname(file.originalname);
+    const ext = path.extname(safeOriginalName);
     const title =
-      path.basename(file.originalname, ext) || file.originalname;
+      path.basename(safeOriginalName, ext) || safeOriginalName || '未命名文档';
 
     // 1. 先创建 Document 行（content=null, originalPath=null, version=1）
     // createdBy 记录上传者，用于权限校验与"我的文档"视图
@@ -134,7 +152,8 @@ export class UploadsService {
 
     const uploadDir = getUploadDir();
     const originalDir = path.join(uploadDir, 'original', docId);
-    const originalFilename = `${docId}-${file.originalname}`;
+    // 落盘文件名用 docId + 清洗后的纯文件名，杜绝任何穿越可能
+    const originalFilename = `${docId}-${safeOriginalName}`;
     const originalAbs = path.join(originalDir, originalFilename);
     // 临时输入文件，供 parser 读取
     const tmpInput = path.join(originalDir, `input${ext}`);

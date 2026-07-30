@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue';
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 // pdfjs-dist v4+ 为 ESM 包，整体导入
 import * as pdfjsLib from 'pdfjs-dist';
 
@@ -30,14 +30,27 @@ const scale = ref(1);
 
 // 已加载的 pdf 文档代理
 let pdfDoc: any = null;
+// 当前进行中的渲染任务，便于切换页码/缩放或卸载时取消，避免后台渲染与报错
+let renderTask: { cancel: () => void; promise: Promise<void> } | null = null;
+// 组件是否已卸载：卸载后异步回调不再写状态
+let destroyed = false;
 
 /**
  * 渲染当前页到 canvas
  */
 async function renderPage() {
   if (!pdfDoc) return;
+  // 取消上一次未完成的渲染
+  if (renderTask) {
+    try {
+      renderTask.cancel();
+    } catch {
+      // ignore
+    }
+  }
   try {
     const page = await pdfDoc.getPage(currentPage.value);
+    if (destroyed || !pdfDoc) return;
     const viewport = page.getViewport({ scale: scale.value });
     const canvas = canvasRef.value;
     if (!canvas) return;
@@ -45,9 +58,12 @@ async function renderPage() {
     if (!ctx) return;
     canvas.width = viewport.width;
     canvas.height = viewport.height;
-    await page.render({ canvasContext: ctx, viewport }).promise;
-  } catch (err) {
-    // 渲染失败仅记录，不阻断
+    const task = page.render({ canvasContext: ctx, viewport });
+    renderTask = task;
+    await task.promise;
+  } catch (err: any) {
+    // 切换页码/缩放会触发取消，属正常流程，静默
+    if (err?.name === 'RenderingCancelledException') return;
     console.error('[PdfViewer] 渲染失败', err);
   }
 }
@@ -60,13 +76,26 @@ async function loadPdf() {
   error.value = null;
   try {
     pdfDoc = await pdfjsLib.getDocument(props.src).promise;
+    if (destroyed) {
+      // 加载过程中组件已卸载，立即释放
+      try {
+        pdfDoc.destroy();
+      } catch {
+        // ignore
+      }
+      pdfDoc = null;
+      return;
+    }
     totalPages.value = pdfDoc.numPages;
     currentPage.value = 1;
     await renderPage();
   } catch (err: any) {
+    if (destroyed) return;
     error.value = err?.message ?? '加载 PDF 失败';
   } finally {
-    loading.value = false;
+    if (!destroyed) {
+      loading.value = false;
+    }
   }
 }
 
@@ -117,6 +146,28 @@ watch(
 
 onMounted(() => {
   if (props.src) loadPdf();
+});
+
+// 卸载时释放 pdfjs 资源：取消进行中的渲染任务并销毁文档代理
+// 否则 PDF worker 线程与内存不会回收，频繁切换文档会累积泄漏
+onBeforeUnmount(() => {
+  destroyed = true;
+  if (renderTask) {
+    try {
+      renderTask.cancel();
+    } catch {
+      // ignore
+    }
+    renderTask = null;
+  }
+  if (pdfDoc) {
+    try {
+      pdfDoc.destroy();
+    } catch {
+      // ignore
+    }
+    pdfDoc = null;
+  }
 });
 </script>
 

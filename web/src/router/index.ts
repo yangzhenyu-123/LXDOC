@@ -24,6 +24,13 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/DocumentView.vue'),
   },
   {
+    // Docsify 风格阅读视图：专为 Markdown / AI 总结文档设计的纯阅读页
+    // AI 总结生成后跳转至此，提供清爽的 docsify 风格渲染 + 查看原文入口
+    path: '/read/:docId',
+    name: 'read',
+    component: () => import('@/views/DocsifyReaderView.vue'),
+  },
+  {
     path: '/search',
     name: 'search',
     component: () => import('@/views/SearchView.vue'),

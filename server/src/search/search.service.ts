@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { EntityManager } from 'typeorm';
+import { EntityManager, In } from 'typeorm';
 import { Category } from '../categories/category.entity';
 import { AccessControlService } from '../organizations/access-control.service';
 import { AuthUser } from '../common/decorators/current-user.decorator';
@@ -41,7 +41,15 @@ interface SearchRow {
   updated_at: Date;
   version: number;
   rank: number;
+  /** 窗口函数计算的总命中数（与分页无关） */
+  total: number;
 }
+
+/**
+ * UUID v4 正则，用于过滤 ancestorOrgIds 中可能的非法值，
+ * 避免 cast 为 uuid[] 时 PostgreSQL 抛 invalid input syntax。
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 @Injectable()
 export class SearchService {
@@ -57,6 +65,10 @@ export class SearchService {
    * 3. 按当前用户读权限过滤可见范围
    * 4. 批量补 categoryName
    * 5. 生成高亮片段
+   *
+   * 安全：ILIKE 的 % _ \ 通配符转义，避免用户输入干扰匹配语义；
+   * ancestorOrgIds cast 为 uuid[] 前过滤非法值，避免 SQL 报错。
+   * 性能：用 COUNT(*) OVER() 窗口函数在单次查询拿到 total，省去单独 count 查询。
    */
   async search(
     q: string,
@@ -68,8 +80,9 @@ export class SearchService {
     const safePageSize = Math.max(1, Math.floor(pageSize));
     const offset = (safePage - 1) * safePageSize;
 
-    // ILIKE 模式：'%q%'
-    const likePattern = `%${q}%`;
+    // 转义 ILIKE 通配符（% _ \），用 \ 作为转义字符，ESC 子句声明
+    const escapedQ = (q ?? '').replace(/[%_\\]/g, '\\$&');
+    const likePattern = `%${escapedQ}%`;
 
     // 构造读权限 SQL 片段与参数（位置参数从 $5 起，前 4 个留给 likePattern/q/pageSize/offset）
     const scope = this.accessControl.getReadScope(user);
@@ -78,7 +91,10 @@ export class SearchService {
     if (!scope.isFullAccess) {
       // 个人文档 OR 归属祖先 org 的文档
       // 参数：personal、userId、group、department、ancestorIds[]
-      const ancestorIds = scope.ancestorOrgIds;
+      // 过滤非法 uuid，避免 cast uuid[] 报错
+      const ancestorIds = (scope.ancestorOrgIds ?? []).filter((id) =>
+        UUID_RE.test(id),
+      );
       scopeParams.push(
         DocumentOwnerType.PERSONAL,
         scope.userId,
@@ -95,33 +111,28 @@ export class SearchService {
       }
     }
 
-    // 查询命中行 + rank
+    // 单次查询：结果 + rank + 总命中数（窗口函数）
     // $1 = likePattern, $2 = q, $3 = pageSize, $4 = offset, $5+ = scope
     const rows = (await this.entityManager.query(
       `SELECT id, title, content, format, category_id, updated_at, version,
               CASE WHEN title ILIKE $1 THEN 0
                    WHEN title % $2 THEN 1
                    WHEN content ILIKE $1 THEN 2
-                   ELSE 3 END AS rank
+                   ELSE 3 END AS rank,
+              COUNT(*) OVER() AS total
        FROM documents
-       WHERE (title ILIKE $1 OR content ILIKE $1 OR title % $2 OR content % $2)
+       WHERE (title ILIKE $1 ESCAPE '\\' OR content ILIKE $1 ESCAPE '\\'
+              OR title % $2 OR content % $2)
        ${scopeSql}
        ORDER BY rank ASC, updated_at DESC
        LIMIT $3 OFFSET $4`,
       [likePattern, q, safePageSize, offset, ...scopeParams],
     )) as SearchRow[];
 
-    // 总命中数
-    const countRows = (await this.entityManager.query(
-      `SELECT COUNT(*)::int AS cnt
-       FROM documents
-       WHERE (title ILIKE $1 OR content ILIKE $1 OR title % $2 OR content % $2)
-       ${scopeSql}`,
-      [likePattern, q, ...scopeParams],
-    )) as { cnt: number }[];
-    const total = countRows[0]?.cnt ?? 0;
+    // 窗口函数返回的 total（所有行相同），取第一行；无结果时为 0
+    const total = rows.length > 0 ? Number(rows[0].total ?? 0) : 0;
 
-    // 批量查询 categoryName
+    // 批量查询 categoryName（用 In 操作符，避免 OR 列表）
     const categoryIds = Array.from(
       new Set(
         rows
@@ -134,7 +145,7 @@ export class SearchService {
     if (categoryIds.length > 0) {
       const categoryRepo = this.entityManager.getRepository(Category);
       const categories = await categoryRepo.find({
-        where: categoryIds.map((id) => ({ id })),
+        where: { id: In(categoryIds) },
         select: ['id', 'name'],
       });
       for (const c of categories) {

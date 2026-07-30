@@ -36,12 +36,14 @@ export enum DocumentOwnerType {
  * - pandoc: docx 经 pandoc 抽取的索引文本（仅检索，docx 走 OnlyOffice 编辑）
  * - pdf_text: pdf-parse 提取的全文
  * - onlyoffice: docx 由 OnlyOffice 回写标记
+ * - ai_summary: AI（GLM5.2）基于原文档生成的总结文档，采用 Docsify 风格渲染
  */
 export enum ContentSource {
   MANUAL = 'manual',
   PANDOC = 'pandoc',
   PDF_TEXT = 'pdf_text',
   ONLYOFFICE = 'onlyoffice',
+  AI_SUMMARY = 'ai_summary',
 }
 
 /**
@@ -114,6 +116,12 @@ export class Document {
     default: ContentSource.MANUAL,
   })
   contentSource: ContentSource;
+
+  // 源文档 id（仅 AI 总结文档有值）：指向被总结的原文档，用于反向追溯与阅读页"查看原文"入口
+  // 普通文档为 null。单向关联：原文档不存 summaryDocId，需查总结文档时按 source_doc_id 反查
+  @Index()
+  @Column({ name: 'source_doc_id', type: 'uuid', nullable: true })
+  sourceDocId: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

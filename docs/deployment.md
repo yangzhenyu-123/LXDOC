@@ -16,6 +16,7 @@ docker compose up -d
 | `frontend` | 8080 | nginx 托管前端 + 反代 `/api`、`/onlyoffice` |
 | `backend` | 3000 | NestJS API |
 | `onlyoffice` | 8081 | OnlyOffice Document Server |
+| `pdf2html` | 7000 | pdf2htmlEX sidecar（PDF 版式预览，仅内网） |
 | `postgres` | 5432 | PostgreSQL 16 |
 
 启动后访问 http://localhost:8080，默认管理员 `admin@lxdoc.local` / `lxdoc12345`。
@@ -45,8 +46,9 @@ docker compose up -d
 
 - `/` → 前端静态资源（SPA 回退 index.html）
 - `/api/` → `backend:3000`
-- `/uploads/` → `backend:3000`（兼容旧链接）
 - `/onlyoffice/` → `onlyoffice:80`（WebSocket + 长超时 + 100m body）
+
+> 注意：nginx **不**直接暴露 `/uploads/` 目录。所有原始文件 / 图片访问统一走鉴权接口 `/api/files/...`（基于 JWT 签名 token），直接映射磁盘会导致越权下载。
 
 ## 环境变量
 
@@ -87,8 +89,9 @@ docker compose up -d
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PDF2HTML_BIN` | pdf2htmlEX | pdf2htmlEX 路径（缺失时版式预览降级报错） |
-| `SOFFICE_BIN` | soffice | LibreOffice soffice 路径 |
+| `PDF2HTML_URL` | http://pdf2html:7000 | pdf2htmlEX sidecar HTTP 地址；为空则降级为本地 `PDF2HTML_BIN` 二进制 |
+| `PDF2HTML_BIN` | pdf2htmlEX | 本地 pdf2htmlEX 二进制路径（仅 `PDF2HTML_URL` 为空时使用，开发降级） |
+| `SOFFICE_BIN` | soffice | LibreOffice soffice 路径（PDF→docx，后端镜像内本地执行） |
 
 ### LLM
 
@@ -117,18 +120,23 @@ docker compose up -d
 pandoc libreoffice poppler-utils fonts-noto-cjk
 ```
 
-### pdf2htmlEX 特别说明
+- `pandoc` / `libreoffice`（soffice）：PDF 转可编辑（PDF→docx→markdown），在后端镜像内本地执行
+- `poppler-utils`：PDF 元信息辅助
 
-`pdf2htmlEX` 在 Debian stable 仓库**不可用**（仅 sid/unstable），Dockerfile 默认未安装。影响：
+### PDF 版式预览（pdf2htmlEX sidecar）
 
-- PDF「版式预览」tab 不可用，会显示错误提示
-- 「翻页预览」「编辑文本」「转可编辑」不受影响
+`pdf2htmlEX` 在 Debian stable 仓库不可用，故作为独立 sidecar 服务 `docker/pdf2html`，**docker-compose 已内置**，开箱即用：
 
-启用方案（任选其一）：
+- 镜像基于 `debian:bookworm-slim`，下载 pdf2htmlEX 官方 AppImage（v0.18.8.rc1，固定版本），构建时预解压（`--appimage-extract`）到 `/opt/pdf2htmlex`，运行时直接调 `AppRun`（无需 FUSE）
+- HTTP 服务仅依赖 Python 标准库（`server.py`），监听 7000：`POST /convert`（请求体为原始 PDF 字节，返回版式保真 HTML）、`GET /health`
+- 仅 compose 内网暴露，不对外发布，故无需鉴权 token
+- 后端 `PdfToolsService` 通过 `PDF2HTML_URL` 以 HTTP 调用，结果按 `docId#version` 缓存到 `uploads/cache/<docId>/`
 
-1. **自行构建衍生镜像**：在 Dockerfile.backend 中加装 pdf2htmlEX（参考 [pdf2htmlEX 官方构建](https://github.com/pdf2htmlEX/pdf2htmlEX)）
-2. **换用第三方镜像**：基于已含 pdf2htmlEX 的基础镜像
-3. **单独服务**：用独立的 pdf2htmlEX 容器，后端通过 HTTP 调用
+**降级**：若 `PDF2HTML_URL` 为空（如本地开发），后端回退到本地 `PDF2HTML_BIN` 二进制（需本机安装 pdf2htmlEX）。sidecar 故障时仅影响 PDF「版式预览」tab，「翻页预览」「编辑文本」「转可编辑」不受影响。
+
+**自建 sidecar**：如内网无法直连 GitHub 下载 AppImage，可用 `--build-arg PDF2HTML_APPIMAGE_URL=<内网地址>` 覆盖下载源，或自行构建 sidecar 镜像后通过 `PDF2HTML_URL` 指向。
+
+> 注：该 AppImage 仅为 x86_64。arm64 部署需自行从源码构建 pdf2htmlEX。
 
 ## 本地开发
 
@@ -141,7 +149,7 @@ pnpm install
 pnpm dev          # 监听 3000，热重载
 ```
 
-本地需安装 `pandoc`（macOS `brew install pandoc`，Linux `apt install pandoc`）。OnlyOffice 可用容器：
+本地需安装 `pandoc`（macOS `brew install pandoc`，Linux `apt install pandoc`）。PDF 版式预览可选：本地开发将 `.env` 中 `PDF2HTML_URL` 留空，并安装本地 `pdf2htmlEX` 二进制（设 `PDF2HTML_BIN`），否则该 tab 会报工具不可用。OnlyOffice 可用容器：
 
 ```bash
 docker run -d --name onlyoffice -p 8081:80 \
@@ -193,9 +201,16 @@ TypeORM `synchronize=true`（开发模式自动建表），生产应改用 migra
 - 检查 `ONLYOFFICE_JWT_SECRET` 与 onlyoffice 容器 `JWT_SECRET` 是否一致
 - 查 OnlyOffice 日志：`docker logs -f lxdoc-onlyoffice`
 
-### PDF 版式预览报错「pdf2htmlEX 未安装」
+### PDF 版式预览报错
 
-见上文 [pdf2htmlEX 特别说明](#pdf2htmlex-特别说明)。
+docker-compose 部署下版式预览由 `pdf2html` sidecar 提供，开箱即用。若报错排查：
+
+- sidecar 是否健康：`docker compose ps pdf2html`、`docker logs lxdoc-pdf2html`
+- 后端能否访问 sidecar：`docker exec lxdoc-backend node -e "fetch('http://pdf2html:7000/health').then(r=>console.log(r.status))"`
+- 后端 `PDF2HTML_URL` 是否正确指向 `http://pdf2html:7000`
+- 本地开发（非 compose）需将 `PDF2HTML_URL` 留空并安装本地 pdf2htmlEX，或单独 `docker compose up pdf2html` 后指向 `http://localhost:7000`
+
+详见上文 [PDF 版式预览](#pdf-版式预览pdf2htmlex-sidecar)。
 
 ### 图片加载 401 / token 过期
 

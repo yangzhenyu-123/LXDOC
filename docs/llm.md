@@ -1,6 +1,6 @@
 # LLM 接入
 
-本文描述 LXDOC 的 LLM 架构设计、GLM5.2 接入方式与后续规划。当前为**架构骨架**，未接入业务功能，待内网 GLM 端点确认后启用。
+本文描述 LXDOC 的 LLM 架构设计、GLM5.2 接入方式与已落地的「存档+总结」工作流。内网仅有 GLM5.2 对话模型，无向量模型，故采用纯文本投喂方式（不做 RAG）。
 
 ## 设计目标
 
@@ -78,13 +78,13 @@ import { OptionalLlm } from '../llm/optional-llm.decorator';
 import { LlmService } from '../llm/llm.service';
 
 @Injectable()
-export class DocumentAiService {
+export class SomeService {
   constructor(@OptionalLlm() private llm?: LlmService) {}
 
-  async summarize(text: string): Promise<string | null> {
+  async doSomething(text: string): Promise<string | null> {
     if (!this.llm) return null;                    // LLM 模块未导入
     const result = await this.llm.chat([
-      { role: 'system', content: '用 200 字总结以下文档' },
+      { role: 'system', content: '...' },
       { role: 'user', content: text },
     ]);
     return result?.content ?? null;                // 未启用/失败均返回 null
@@ -93,6 +93,62 @@ export class DocumentAiService {
 ```
 
 模块需 `imports: [LlmModule]`。`@OptionalLlm()` 通过 `@Inject(LlmService) + @Optional()` 实现，LlmModule 未导入时参数为 undefined。
+
+## AI 总结工作流（已落地）
+
+### 概述
+
+「存档 + 总结」工作流：上传文档 → 解析为文本（已有 parser）→ 调 GLM5.2 总结 → 生成新的 Markdown 文档（Docsify 风格渲染）。
+
+内网无向量模型，故**不做 RAG 检索**，采用纯文本投喂：
+
+```
+原文档(doc.content，已由 parser 解析)
+   │
+   ▼ truncateForSummary（按 LLM_SUMMARY_MAX_CHARS 截断头尾）
+   ▼ buildSummaryPrompt（system 约束 + user 标题+正文）
+   ▼ LlmService.chat（GLM5.2，temperature=0.3）
+   ▼ 生成结构化 Markdown
+   ▼ 事务内新建 Document（format=md, contentSource=ai_summary, sourceDocId=原文档）
+   ▼ 前端跳转 /read/:docId（Docsify 风格阅读视图）
+```
+
+### 接口
+
+`POST /api/documents/:id/summarize`（登录可调用，对原文档有读权限即可触发）
+
+- LLM 未启用/未就绪：返回 `503 ServiceUnavailableException`
+- 原文档无文本内容：返回 `400 BadRequestException`
+- 成功：返回新建的总结文档（`contentSource=ai_summary`，`sourceDocId` 指向原文档）
+
+### 关键设计
+
+| 要点 | 说明 |
+|---|---|
+| 文本来源 | `doc.content`，即上传时 parser 解析入库的文本（md/txt 直接内容，docx/odt 为 pandoc 抽取，pdf 为 pdf-parse 全文） |
+| 文本截断 | 超过 `LLM_SUMMARY_MAX_CHARS`（默认 80000 字符）时保留头尾各半，中间省略标记，兼顾开头摘要与结尾结论 |
+| Prompt | system 约束输出结构化 Markdown（概述/核心要点/关键信息/适用场景），忠于原文不编造；user 含标题+正文 |
+| 调参 | `temperature=0.3`（总结任务求稳定），`maxTokens=4096`，`timeout=120s`（总结耗时较长） |
+| 新文档归属 | 继承原文档 `categoryId/ownerType/ownerId`，确保可见范围一致；title 加「- AI总结」后缀；tags 追加 `ai-summary` |
+| 权限 | 对原文档读权限即可触发（生成的是新文档，不修改原文档）；新文档 `createdBy` 为触发者 |
+| 反向追溯 | `source_doc_id` 字段指向原文档，阅读视图与编辑视图据此提供「查看原文」入口 |
+
+### 配置
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `LLM_ENABLED` | false | 是否启用 LLM（false 时 summarize 返回 503） |
+| `LLM_BASE_URL` | http://internal-glm/v1 | 内网 GLM5.2 OpenAI 兼容端点 |
+| `LLM_API_KEY` | （空） | 调用密钥，内网免鉴权可留空 |
+| `LLM_MODEL` | glm-5.2 | 对话模型名 |
+| `LLM_SUMMARY_MAX_CHARS` | 80000 | 总结单次投喂文本上限（字符数） |
+| `LLM_TIMEOUT` | 30000 | 单次请求超时（毫秒），总结任务内部取 max(timeout, 120000) |
+
+### 前端
+
+- 文档详情页（`DocumentView.vue`）工具栏「AI 总结」按钮：调用接口，成功后跳转 `/read/:docId`
+- 阅读视图（`DocsifyReaderView.vue`，路由 `/read/:docId`）：marked 渲染 Markdown + docsify 风格主题，顶部提供「查看原文」「编辑」入口
+- 总结文档在编辑视图侧栏元信息显示「来源 → 查看原文档」链接
 
 ## 健康检查
 
@@ -137,20 +193,20 @@ export class DocumentAiService {
 3. 重启后端，调 `GET /api/llm/health` 确认 `ready=true`
 4. 业务模块按需接入（见下文规划）
 
-## 后续规划（非本期）
+## 后续规划
 
-### 第一期：连通性
+### 第一期：连通性 ✅
 
-- LLM 模块 + GLM Provider + 健康检查 ✅（已完成骨架）
-- 待内网端点确认后启用
+- LLM 模块 + GLM Provider + 健康检查 ✅（已完成）
 
-### 第二期：上传后 AI 处理
+### 第二期：AI 总结工作流 ✅
 
-- 上传文档后异步生成摘要（写 `Document.summary` 新字段）
-- 自动建议标签（写入 `tags`）
-- 失败不阻断上传主流程
+- 上传文档解析为文本 → GLM5.2 总结 → 生成新 Markdown 文档（Docsify 渲染）✅
+- 详见上文 [AI 总结工作流](#ai-总结工作流已落地)
 
-### 第三期：RAG 向量检索
+### 第三期：RAG 向量检索（暂缓）
+
+> 内网无向量模型，本项暂缓。待内网提供 embedding 接口后启用。
 
 - 启用 `pgvector` 扩展
 - `Document.embedding vector(N)` 字段

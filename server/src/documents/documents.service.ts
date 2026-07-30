@@ -1,9 +1,11 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
@@ -20,6 +22,9 @@ import { AccessControlService } from '../organizations/access-control.service';
 import { FilesService } from '../files/files.service';
 import { PdfToolsService } from './pdf-tools.service';
 import { AuthUser } from '../common/decorators/current-user.decorator';
+import { OptionalLlm } from '../llm/optional-llm.decorator';
+import { LlmService } from '../llm/llm.service';
+import { llmConfig } from '../config/llm.config';
 
 /**
  * 文档版本列表响应（不含 content，避免大响应）
@@ -67,6 +72,8 @@ export class DocumentsService {
     private readonly accessControl: AccessControlService,
     private readonly filesService: FilesService,
     private readonly pdfTools: PdfToolsService,
+    // LLM 可选注入：LlmModule 已导入时拿到 LlmService，未启用时为 undefined
+    @OptionalLlm() private readonly llm?: LlmService,
   ) {}
 
   /**
@@ -132,8 +139,9 @@ export class DocumentsService {
     const fileToken = this.filesService.signFileToken(id, user.id);
 
     // 改写图片 src：./media/xxx / media/xxx / images/xxx → /api/files/<docId>/image/<name>?token=
+    // 仅匹配相对路径（media/ 或 images/ 前缀），跳过 http(s)/data 等外链，避免误替换
     html = html.replace(
-      /src=["']\.?\/?(?:media\/|images\/)?([^"']+)["']/g,
+      /src=["']\.?\/?(?:media\/|images\/)([^"']+)["']/g,
       (_match, name: string) =>
         `src="/api/files/${id}/image/${encodeURIComponent(name)}?token=${fileToken}"`,
     );
@@ -195,33 +203,177 @@ export class DocumentsService {
       );
     }
 
-    // 新建 markdown 文档，继承归属与分类
-    const newDoc = this.documentRepo.create({
-      categoryId: doc.categoryId,
-      title: `${doc.title}(可编辑)`,
-      content: markdown,
-      format: DocumentFormat.MD,
-      originalPath: null,
-      version: 1,
-      author: doc.author,
-      tags: [...(doc.tags ?? [])],
-      createdBy: user.id,
-      ownerType: doc.ownerType,
-      ownerId:
-        doc.ownerType === DocumentOwnerType.PERSONAL ? user.id : doc.ownerId,
-      contentSource: ContentSource.MANUAL,
-    });
-    const saved = await this.documentRepo.save(newDoc);
-    // 创建 version=1 初始快照
-    await this.versionRepo.save(
-      this.versionRepo.create({
-        documentId: saved.id,
-        version: 1,
+    // 事务内创建文档与初始版本快照，保证一致性
+    return this.entityManager.transaction(async (manager) => {
+      const docRepo = manager.getRepository(Document);
+      const versionRepo = manager.getRepository(DocumentVersion);
+
+      // 新建 markdown 文档，继承归属与分类
+      const newDoc = docRepo.create({
+        categoryId: doc.categoryId,
+        title: `${doc.title}(可编辑)`,
         content: markdown,
-        snapshotPath: null,
-      }),
-    );
-    return saved;
+        format: DocumentFormat.MD,
+        originalPath: null,
+        version: 1,
+        author: doc.author,
+        tags: [...(doc.tags ?? [])],
+        createdBy: user.id,
+        ownerType: doc.ownerType,
+        ownerId:
+          doc.ownerType === DocumentOwnerType.PERSONAL ? user.id : doc.ownerId,
+        contentSource: ContentSource.MANUAL,
+      });
+      const saved = await docRepo.save(newDoc);
+      // 创建 version=1 初始快照
+      await versionRepo.save(
+        versionRepo.create({
+          documentId: saved.id,
+          version: 1,
+          content: markdown,
+          snapshotPath: null,
+        }),
+      );
+      return saved;
+    });
+  }
+
+  /**
+   * AI 总结：基于原文档已解析的文本，调用 GLM5.2 生成结构化 Markdown 总结文档
+   *
+   * 工作流（存档+总结）：原文档保留不动 → 投喂文本给 LLM → 生成新 Markdown 文档（Docsify 风格渲染）
+   *
+   * 设计要点：
+   * - 无向量模型：纯文本投喂，不做 RAG 检索；文本过长按 summaryMaxChars 截断（保留头尾）
+   * - 权限：对原文档有读权限即可触发（生成的是新文档，不修改原文档）
+   * - 新文档继承原文档 categoryId/ownerType/ownerId，归属同一空间，确保可见范围一致
+   * - sourceDocId 反向指向原文档，contentSource=AI_SUMMARY 标记为 AI 生成
+   * - LLM 未启用/未就绪：抛 ServiceUnavailableException（用户主动触发的功能，需明确报错而非静默降级）
+   * - title 加「- AI总结」后缀，tags 追加 'ai-summary' 便于检索筛选
+   *
+   * @return 新创建的总结文档（format=md, contentSource=ai_summary）
+   */
+  async summarize(id: string, user: AuthUser): Promise<Document> {
+    const doc = await this.findOne(id, user);
+
+    // LLM 未启用时明确报错（而非降级返回 null）
+    if (!this.llm || !this.llm.isReady()) {
+      throw new ServiceUnavailableException(
+        'AI 总结不可用：LLM 未启用或未就绪，请联系管理员配置 LLM_ENABLED 与 LLM_BASE_URL',
+      );
+    }
+
+    // 读取已解析的文本内容
+    const rawText = (doc.content ?? '').trim();
+    if (!rawText) {
+      throw new BadRequestException(
+        '文档无可用文本内容（可能尚未解析或为空文档），无法生成总结',
+      );
+    }
+
+    // 截断过长文本，避免超出模型上下文窗口；保留头尾以兼顾开头与结尾信息
+    const feedText = this.truncateForSummary(rawText);
+
+    // 构造总结 prompt：要求生成结构化 Markdown，适合 Docsify 阅读视图
+    const summaryPrompt = this.buildSummaryPrompt(doc.title, feedText);
+
+    const result = await this.llm.chat(summaryPrompt.messages, {
+      temperature: 0.3, // 总结任务用较低温度保证稳定
+      maxTokens: summaryPrompt.maxTokens,
+      timeout: Math.max(llmConfig.timeout, 120_000), // 总结耗时较长，给 2 分钟
+    });
+
+    if (!result || !result.content?.trim()) {
+      throw new ServiceUnavailableException(
+        'AI 总结生成失败：模型返回为空，请稍后重试或检查 LLM 服务状态',
+      );
+    }
+
+    const summaryMarkdown = result.content.trim();
+
+    // 事务内创建总结文档与初始版本快照
+    return this.entityManager.transaction(async (manager) => {
+      const docRepo = manager.getRepository(Document);
+      const versionRepo = manager.getRepository(DocumentVersion);
+
+      const newDoc = docRepo.create({
+        categoryId: doc.categoryId,
+        title: `${doc.title} - AI总结`,
+        content: summaryMarkdown,
+        format: DocumentFormat.MD,
+        originalPath: null,
+        version: 1,
+        author: doc.author,
+        tags: [...(doc.tags ?? []), 'ai-summary'],
+        createdBy: user.id,
+        ownerType: doc.ownerType,
+        ownerId:
+          doc.ownerType === DocumentOwnerType.PERSONAL ? user.id : doc.ownerId,
+        contentSource: ContentSource.AI_SUMMARY,
+        sourceDocId: doc.id,
+      });
+      const saved = await docRepo.save(newDoc);
+      await versionRepo.save(
+        versionRepo.create({
+          documentId: saved.id,
+          version: 1,
+          content: summaryMarkdown,
+          snapshotPath: null,
+        }),
+      );
+      this.logger.log(
+        `AI 总结生成成功 source=${doc.id} summary=${saved.id} ` +
+          `promptTokens=${result.promptTokens ?? '-'} completionTokens=${result.completionTokens ?? '-'}`,
+      );
+      return saved;
+    });
+  }
+
+  /**
+   * 截断过长文本以适配模型上下文窗口
+   * 保留前半 + 后半（各半），中间以省略标记连接，兼顾开头摘要与结尾结论
+   */
+  private truncateForSummary(text: string): string {
+    const max = llmConfig.summaryMaxChars;
+    if (text.length <= max) {
+      return text;
+    }
+    const half = Math.floor(max / 2);
+    const head = text.slice(0, half);
+    const tail = text.slice(text.length - half);
+    return `${head}\n\n…（中间内容已省略，原文共 ${text.length} 字符）…\n\n${tail}`;
+  }
+
+  /**
+   * 构造总结 prompt
+   * - system：设定角色与输出格式约束（结构化 Markdown，适合 Docsify 渲染）
+   * - user：文档标题 + 截断后的正文
+   * 返回 messages 与建议 maxTokens
+   */
+  private buildSummaryPrompt(
+    title: string,
+    feedText: string,
+  ): { messages: { role: 'system' | 'user'; content: string }[]; maxTokens: number } {
+    const system = [
+      '你是一名专业的文档分析师，擅长将冗长的文档提炼为结构清晰的中文总结。',
+      '请基于用户提供的文档内容，生成一份结构化 Markdown 总结文档，要求：',
+      '1. 使用 Markdown 标题层级（# 一级标题为文档总结标题，## 二级标题分节）',
+      '2. 开头用一段「概述」概括文档主旨（2-4 句）',
+      '3. 提炼「核心要点」用无序列表呈现，每条简洁明了',
+      '4. 若文档含关键数据/结论/日期，单列「关键信息」小节',
+      '5. 末尾给出「适用场景」或「后续建议」（1-2 条）',
+      '6. 只输出 Markdown 正文，不要包裹在代码块中，不要输出与总结无关的寒暄',
+      '7. 忠于原文，不得编造未提及的信息',
+    ].join('\n');
+    const userContent = `文档标题：${title}\n\n文档内容：\n${feedText}`;
+    return {
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: userContent },
+      ],
+      // 总结输出上限 4096 tokens，足够一份结构化总结
+      maxTokens: 4096,
+    };
   }
 
   /**
@@ -262,6 +414,9 @@ export class DocumentsService {
    * 1. 写入当前内容的版本快照（version=当前 version，若已存在则跳过）
    * 2. 更新 Document 的 title/content/tags（若提供），version + 1
    * 权限：admin 全权；editor 仅能改自己 createdBy 的文档；其他拒绝
+   *
+   * 并发安全：事务内 SELECT FOR UPDATE 锁定文档行后读取最新 version，
+   * 避免两个并发 PUT 都读到旧 version 导致后者覆盖前者且 version 不递增。
    */
   async update(
     id: string,
@@ -275,25 +430,37 @@ export class DocumentsService {
       const docRepo = manager.getRepository(Document);
       const versionRepo = manager.getRepository(DocumentVersion);
 
+      // 锁定文档行，读取最新 version（防止并发覆盖）
+      const locked = await manager
+        .getRepository(Document)
+        .createQueryBuilder('d')
+        .setLock('pessimistic_write')
+        .where('d.id = :id', { id })
+        .getOne();
+      if (!locked) {
+        throw new NotFoundException(`文档 ${id} 不存在`);
+      }
+      const currentVersion = locked.version;
+
       // 1. 写入当前内容快照（version=当前 version）
       // 若该版本已存在（例如从未修改过、version=1 的初始快照），则跳过
       const existing = await versionRepo.findOne({
-        where: { documentId: id, version: doc.version },
+        where: { documentId: id, version: currentVersion },
       });
       if (!existing) {
         await versionRepo.save(
           versionRepo.create({
             documentId: id,
-            version: doc.version,
-            content: doc.content ?? '',
+            version: currentVersion,
+            content: locked.content ?? '',
             snapshotPath: null,
           }),
         );
       }
 
-      // 2. 更新 Document
+      // 2. 更新 Document（基于锁定行读取的最新 version 递增）
       const patch: Partial<Document> = {
-        version: doc.version + 1,
+        version: currentVersion + 1,
         updatedAt: new Date(),
       };
       if (dto.title !== undefined) patch.title = dto.title;
@@ -355,6 +522,8 @@ export class DocumentsService {
    * 2. 写入当前内容快照（version=当前 version，若已存在则跳过）
    * 3. 更新 Document.content = 目标 content、version + 1
    * 权限：admin 全权；editor 仅能回滚自己 createdBy 的文档；其他拒绝
+   *
+   * 并发安全：事务内 SELECT FOR UPDATE 锁定文档行，读取最新 version 后递增。
    */
   async rollback(
     id: string,
@@ -376,16 +545,28 @@ export class DocumentsService {
       const docRepo = manager.getRepository(Document);
       const versionRepo = manager.getRepository(DocumentVersion);
 
+      // 锁定文档行，读取最新 version（防止并发回滚覆盖）
+      const locked = await manager
+        .getRepository(Document)
+        .createQueryBuilder('d')
+        .setLock('pessimistic_write')
+        .where('d.id = :id', { id })
+        .getOne();
+      if (!locked) {
+        throw new NotFoundException(`文档 ${id} 不存在`);
+      }
+      const currentVersion = locked.version;
+
       // 写入当前内容快照
       const existing = await versionRepo.findOne({
-        where: { documentId: id, version: doc.version },
+        where: { documentId: id, version: currentVersion },
       });
       if (!existing) {
         await versionRepo.save(
           versionRepo.create({
             documentId: id,
-            version: doc.version,
-            content: doc.content ?? '',
+            version: currentVersion,
+            content: locked.content ?? '',
             snapshotPath: null,
           }),
         );
@@ -394,7 +575,7 @@ export class DocumentsService {
       // 更新 Document.content 为目标版本内容，version + 1
       await docRepo.update(id, {
         content: target.content,
-        version: doc.version + 1,
+        version: currentVersion + 1,
         updatedAt: new Date(),
       });
 
@@ -434,8 +615,9 @@ export class DocumentsService {
   }
 
   /**
-   * 清理文档对应的磁盘文件：original/<docId>/ 与 images/<docId>/
+   * 清理文档对应的磁盘文件：original/<docId>/、images/<docId>/、cache/<docId>/
    * 文件缺失不视为错误（rm recursive + force）
+   * cache 目录存放 pdf2htmlEX 生成的版式 HTML 与转可编辑的中间产物，需一并清理避免孤儿缓存
    */
   private async cleanupDocFiles(
     docId: string,
@@ -448,6 +630,9 @@ export class DocumentsService {
     // 删除 images/<docId>/ 目录（Pandoc 抽取的图片与编辑器上传的图片）
     const imagesDir = path.join(uploadDir, 'images', docId);
     await fs.rm(imagesDir, { recursive: true, force: true });
+    // 删除 cache/<docId>/ 目录（pdf2htmlEX 版式 HTML 缓存 + 转可编辑中间产物）
+    const cacheDir = path.join(uploadDir, 'cache', docId);
+    await fs.rm(cacheDir, { recursive: true, force: true });
     // originalPath 为空时无需额外处理（已被目录删除覆盖）
     void originalPath;
   }
@@ -507,6 +692,11 @@ export class DocumentsService {
       categoryIds = await this.collectDescendantCategoryIds(categoryId);
     }
 
+    // 防御：空数组时 TypeORM IN() 会生成非法 SQL，直接返回空
+    if (categoryIds.length === 0) {
+      return [];
+    }
+
     const qb = this.documentRepo
       .createQueryBuilder('d')
       .select([
@@ -539,28 +729,35 @@ export class DocumentsService {
   }
 
   /**
-   * 递归收集某分类的所有子孙分类 id（包含自身）
-   * 采用服务层逐层查询，避免依赖数据库特定 CTE 语法
+   * 收集某分类的所有子孙分类 id（包含自身）
+   * 一次性拉取全部分类后在内存构建树，避免逐层 N+1 查询。
    */
   private async collectDescendantCategoryIds(
     rootId: string,
   ): Promise<string[]> {
-    const result: string[] = [rootId];
-    const queue: string[] = [rootId];
     const categoryRepo = this.entityManager.getRepository(Category);
-
-    while (queue.length > 0) {
-      const currentId = queue.shift()!;
-      const children = await categoryRepo.find({
-        where: { parentId: currentId },
-        select: ['id'],
-      });
-      for (const child of children) {
-        result.push(child.id);
-        queue.push(child.id);
+    // 一次查询拉全表（分类通常不大），在内存中遍历
+    const all = await categoryRepo.find({ select: ['id', 'parentId'] });
+    const childrenMap = new Map<string, string[]>();
+    for (const c of all) {
+      if (c.parentId) {
+        const arr = childrenMap.get(c.parentId);
+        if (arr) arr.push(c.id);
+        else childrenMap.set(c.parentId, [c.id]);
       }
     }
-
+    const result: string[] = [rootId];
+    const queue: string[] = [rootId];
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+      const children = childrenMap.get(currentId);
+      if (children) {
+        for (const childId of children) {
+          result.push(childId);
+          queue.push(childId);
+        }
+      }
+    }
     return result;
   }
 }

@@ -17,6 +17,7 @@ erDiagram
     categories ||--o{ categories : "parent_id 自引用树"
     categories ||--o{ documents : "category_id"
     documents ||--o{ document_versions : "版本快照"
+    documents ||--o{ documents : "source_doc_id 总结反向追溯"
     users ||--o{ audit_logs : "user_id 操作者"
 
     users {
@@ -75,7 +76,8 @@ erDiagram
         uuid created_by FK "实际创建人"
         enum owner_type "personal/group/department"
         uuid owner_id "personal=user.id；group/department=org.id"
-        enum content_source "manual/pandoc/pdf_text/onlyoffice"
+        enum content_source "manual/pandoc/pdf_text/onlyoffice/ai_summary"
+        uuid source_doc_id FK "AI总结指向原文档 可空 indexed"
         timestamptz created_at
         timestamptz updated_at
     }
@@ -191,7 +193,8 @@ erDiagram
 | created_by | uuid | nullable, indexed | 实际创建人（不变） |
 | owner_type | enum | default 'personal' | personal / group / department |
 | owner_id | uuid | nullable | personal→user.id；group/department→org.id |
-| content_source | enum | default 'manual' | manual / pandoc / pdf_text / onlyoffice |
+| content_source | enum | default 'manual' | manual / pandoc / pdf_text / onlyoffice / ai_summary |
+| source_doc_id | uuid | nullable, indexed | AI 总结文档指向原文档的 id；普通文档为 null |
 | created_at | timestamptz | | |
 | updated_at | timestamptz | | |
 
@@ -254,6 +257,7 @@ erDiagram
 | documents | content | INDEX | 精确查询 |
 | documents | created_by | INDEX | 我的文档 |
 | documents | owner_type | INDEX | 权限过滤 |
+| documents | source_doc_id | INDEX | AI 总结反向追溯 |
 | audit_logs | user_id | INDEX | 按用户筛选 |
 | audit_logs | action | INDEX | 按动作筛选 |
 | audit_logs | created_at | INDEX | 按时间筛选 |

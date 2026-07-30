@@ -25,8 +25,10 @@ export interface LoginResponse {
 }
 
 // 刷新令牌响应
+// 后端 refresh 采用轮换：每次返回新的 access + 新的 refresh（旧 refresh 立即失效）
 export interface RefreshResponse {
   accessToken: string;
+  refreshToken: string;
 }
 
 // 注册请求体

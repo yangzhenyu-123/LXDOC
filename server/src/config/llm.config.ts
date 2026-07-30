@@ -20,4 +20,7 @@ export const llmConfig = {
   timeout: Number(process.env.LLM_TIMEOUT ?? '30000') || 30000,
   // 最大重试次数（指数退避）
   maxRetries: Number(process.env.LLM_MAX_RETRIES ?? '2') || 2,
+  // 总结单次投喂文本上限（字符数）。超过则截断头尾各半保留，避免超出模型上下文窗口
+  // GLM5.2 上下文窗口较大，默认 80000 字符（约 4 万汉字）兼顾质量与成本
+  summaryMaxChars: Number(process.env.LLM_SUMMARY_MAX_CHARS ?? '80000') || 80000,
 };

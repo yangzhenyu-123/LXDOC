@@ -3,6 +3,15 @@ import client from './client';
 // 文档格式，与后端 DocumentFormat 枚举对齐
 export type DocumentFormat = 'md' | 'txt' | 'docx' | 'odt' | 'pdf';
 
+// 正文来源，与后端 ContentSource 枚举对齐
+// ai_summary 标识 AI 生成的总结文档，前端据此提供 Docsify 阅读入口
+export type ContentSource =
+  | 'manual'
+  | 'pandoc'
+  | 'pdf_text'
+  | 'onlyoffice'
+  | 'ai_summary';
+
 // 文档实体，与后端 Document 实体对齐
 export interface Document {
   id: string;
@@ -17,6 +26,10 @@ export interface Document {
   tags: string[];
   // 创建者用户 id，用于前端权限判断（editor 仅可改/删自己创建的）
   createdBy: string | null;
+  // 正文来源：ai_summary 表示 AI 总结文档，由 summarize 接口生成
+  contentSource?: ContentSource;
+  // 源文档 id（仅 AI 总结文档有值）：指向被总结的原文档，阅读页据此提供"查看原文"入口
+  sourceDocId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -95,6 +108,16 @@ export function convertToEditable(id: string): Promise<Document> {
   return client.post<Document, Document>(
     `/documents/${id}/convert-to-editable`,
   );
+}
+
+/**
+ * AI 总结：基于原文档文本调用 GLM5.2 生成新的 Markdown 总结文档
+ * POST /documents/:id/summarize
+ * 读权限即可触发；LLM 未启用时后端返回 503
+ * 返回新创建的总结文档（contentSource=ai_summary, sourceDocId 指向原文档）
+ */
+export function summarizeDocument(id: string): Promise<Document> {
+  return client.post<Document, Document>(`/documents/${id}/summarize`);
 }
 
 /**

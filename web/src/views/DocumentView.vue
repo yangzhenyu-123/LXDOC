@@ -10,6 +10,7 @@ import {
   getPreviewHtml,
   getPdfHtml,
   convertToEditable,
+  summarizeDocument,
   listVersions,
   rollback as rollbackApi,
   updateDocument,
@@ -96,6 +97,11 @@ const pdfLayoutError = ref<string | null>(null);
 // 转为可编辑文档（需写权限，editor/admin）
 const convertLoading = ref(false);
 const canConvert = computed(() => authStore.canWrite);
+
+// AI 总结：读权限即可触发；基于文档已解析文本生成新 Markdown 总结文档（Docsify 渲染）
+const summarizeLoading = ref(false);
+// 当前文档是否本身是 AI 总结文档（用于显示"查看总结/阅读"入口）
+const isAiSummary = computed(() => doc.value?.contentSource === 'ai_summary');
 
 // docx/odt 模式切换：edit（编辑） / preview（原版预览）
 const docMode = ref<'edit' | 'preview'>('edit');
@@ -293,6 +299,37 @@ async function onConvertToEditable() {
 }
 
 /**
+ * AI 总结：基于当前文档已解析的文本调用 GLM5.2 生成新 Markdown 总结文档
+ * - 读权限即可触发
+ * - 成功后跳转 Docsify 风格阅读视图（/read/:docId）展示总结
+ * - LLM 未启用时后端返回 503，提示用户联系管理员
+ */
+async function onSummarize() {
+  if (!doc.value) return;
+  try {
+    await ElMessageBox.confirm(
+      '将调用 AI（GLM5.2）基于本文档生成一份结构化总结文档，生成后将跳转阅读视图。是否继续？',
+      'AI 总结',
+      { type: 'info', confirmButtonText: '生成总结', cancelButtonText: '取消' },
+    );
+  } catch {
+    return;
+  }
+  summarizeLoading.value = true;
+  try {
+    const newDoc = await summarizeDocument(docId.value);
+    ElMessage.success('AI 总结生成完成，正在跳转阅读视图');
+    router.push(`/read/${newDoc.id}`);
+  } catch (err: any) {
+    const msg =
+      err?.response?.data?.message ?? err?.message ?? 'AI 总结失败';
+    ElMessage.error(`AI 总结失败：${msg}`);
+  } finally {
+    summarizeLoading.value = false;
+  }
+}
+
+/**
  * 加载 docx/odt 原版预览 HTML
  */
 async function loadPreviewHtml() {
@@ -430,6 +467,20 @@ onMounted(() => {
       >
         转为可编辑文档
       </el-button>
+      <!-- AI 总结：基于已解析文本调用 GLM5.2 生成总结文档（读权限即可） -->
+      <el-button
+        :loading="summarizeLoading"
+        @click="onSummarize"
+      >
+        AI 总结
+      </el-button>
+      <!-- 阅读视图：Docsify 风格渲染（Markdown 文档显示，AI 总结文档显示"查看原文"） -->
+      <el-button
+        v-if="doc && (doc.format === 'md' || isAiSummary)"
+        @click="router.push(`/read/${docId}`)"
+      >
+        阅读视图
+      </el-button>
       <el-select
         v-model="selectedVersion"
         placeholder="选择版本"
@@ -555,6 +606,18 @@ onMounted(() => {
               <li><span class="meta-key">作者</span><span class="meta-val">{{ doc.author || '-' }}</span></li>
               <li><span class="meta-key">当前版本</span><span class="meta-val">v{{ doc.version }}</span></li>
               <li><span class="meta-key">格式</span><span class="meta-val">{{ doc.format }}</span></li>
+              <li v-if="isAiSummary">
+                <span class="meta-key">来源</span>
+                <span class="meta-val">
+                  <el-button
+                    link
+                    type="primary"
+                    @click="router.push(`/d/${doc.sourceDocId}`)"
+                  >
+                    查看原文档
+                  </el-button>
+                </span>
+              </li>
               <li><span class="meta-key">创建时间</span><span class="meta-val">{{ formatTime(doc.createdAt) }}</span></li>
               <li><span class="meta-key">最后修改</span><span class="meta-val">{{ formatTime(doc.updatedAt) }}</span></li>
             </ul>

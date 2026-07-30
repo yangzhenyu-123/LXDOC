@@ -4,13 +4,17 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# 固定 pnpm 版本（通过 corepack），保证构建可复现
+ENV PNPM_VERSION=9.12.0
+RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+
 COPY package.json pnpm-lock.yaml* ./
-RUN npm install -g pnpm && pnpm install --prod=false
+RUN pnpm install --prod=false --frozen-lockfile || pnpm install --prod=false
 
 COPY . .
 RUN pnpm build
 
-# Stage 2: nginx 托管 dist/，并反代 /api、/uploads 到后端
+# Stage 2: nginx 托管 dist/，并反代 /api 到后端
 FROM nginx:alpine
 
 # 拷贝构建产物到 nginx 静态目录

@@ -81,6 +81,17 @@ export class DocumentsController {
     return this.service.convertToEditable(id, user);
   }
 
+  // AI 总结：基于原文档文本调用 GLM5.2 生成新的 Markdown 总结文档（读权限即可触发）
+  // 生成的新文档继承原文档归属空间，采用 Docsify 风格渲染（/read/:docId）
+  @Audit(AuditAction.DOCUMENT_CREATE, 'document')
+  @Post('documents/:id/summarize')
+  summarize(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.service.summarize(id, user);
+  }
+
   // 获取 OnlyOffice 前端初始化 config
   // - mode=view：读权限即可
   // - mode=edit：需写权限，由 OnlyOfficeService 内部校验

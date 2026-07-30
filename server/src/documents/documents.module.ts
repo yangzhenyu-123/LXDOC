@@ -9,6 +9,7 @@ import { PdfToolsService } from './pdf-tools.service';
 import { OnlyOfficeService } from './onlyoffice.service';
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { FilesModule } from '../files/files.module';
+import { LlmModule } from '../llm/llm.module';
 import { onlyofficeConfig } from '../config/onlyoffice.config';
 
 /**
@@ -16,14 +17,16 @@ import { onlyofficeConfig } from '../config/onlyoffice.config';
  * - 注册 Document / DocumentVersion 两个实体的 Repository
  * - 导入 OrganizationsModule 拿 AccessControlService 做读写权限校验
  * - 导入 FilesModule 拿 FilesService 在预览 HTML 中签发图片访问 token
+ * - 导入 LlmModule 拿 LlmService 做 AI 总结（GLM5.2）
  * - 注册 JwtModule（OnlyOfficeService 签发/校验 config 与回调 JWT）
- * - 提供文档 CRUD、版本查询、回滚、按分类列表、PDF/OnlyOffice 集成等接口
+ * - 提供文档 CRUD、版本查询、回滚、按分类列表、PDF/OnlyOffice 集成、AI 总结等接口
  */
 @Module({
   imports: [
     TypeOrmModule.forFeature([Document, DocumentVersion]),
     OrganizationsModule,
     FilesModule,
+    LlmModule,
     JwtModule.registerAsync({
       useFactory: () => ({
         secret: onlyofficeConfig.jwtSecret,
