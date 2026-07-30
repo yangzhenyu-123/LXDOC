@@ -1,10 +1,20 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { useRouter } from 'vue-router';
+import { computed, onMounted, reactive, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import {
+  ElMessage,
+  ElMessageBox,
+  type FormInstance,
+  type FormRules,
+} from 'element-plus';
 import CategoryTree from '@/components/CategoryTree.vue';
+import { useAuthStore } from '@/stores/auth';
+import { changePasswordApi } from '@/api/auth';
 
-// LXDOC 根组件：顶部栏 + 左侧分类树（可折叠）+ 主区路由出口
+// LXDOC 根组件：顶部栏（Logo + 搜索 + 上传 + 用户菜单）+ 左侧分类树 + 主区路由出口
 const router = useRouter();
+const route = useRoute();
+const authStore = useAuthStore();
 
 // 全局搜索框输入
 const globalKeyword = ref('');
@@ -48,11 +58,146 @@ function quickUpload() {
 function onSelectCategory(categoryId: string) {
   router.push(`/c/${categoryId}`);
 }
+
+// ============== 用户菜单与修改密码 ==============
+
+// 修改密码对话框
+const pwdDialogVisible = ref(false);
+const pwdFormRef = ref<FormInstance>();
+const pwdForm = reactive({
+  oldPassword: '',
+  newPassword: '',
+  confirmPassword: '',
+});
+const pwdLoading = ref(false);
+
+// 修改密码表单校验规则
+const pwdRules: FormRules = {
+  oldPassword: [{ required: true, message: '请输入原密码', trigger: 'blur' }],
+  newPassword: [
+    { required: true, message: '请输入新密码', trigger: 'blur' },
+    { min: 6, message: '密码至少 6 位', trigger: 'blur' },
+  ],
+  confirmPassword: [
+    { required: true, message: '请再次输入新密码', trigger: 'blur' },
+    {
+      validator: (_rule, value: string, callback) => {
+        if (value !== pwdForm.newPassword) {
+          callback(new Error('两次输入的新密码不一致'));
+        } else {
+          callback();
+        }
+      },
+      trigger: 'blur',
+    },
+  ],
+};
+
+// 用户头像首字母
+const avatarText = computed(() => {
+  const name = authStore.user?.username || authStore.user?.email || '?';
+  return name.charAt(0).toUpperCase();
+});
+
+// 是否在公共路由（如登录页）：不显示主布局
+const isPublicRoute = computed(() => !!route.meta.public);
+
+/**
+ * 打开修改密码对话框
+ */
+function openChangePassword() {
+  pwdForm.oldPassword = '';
+  pwdForm.newPassword = '';
+  pwdForm.confirmPassword = '';
+  pwdDialogVisible.value = true;
+}
+
+/**
+ * 提交修改密码
+ */
+async function submitChangePassword() {
+  if (!pwdFormRef.value) return;
+  await pwdFormRef.value.validate(async (valid) => {
+    if (!valid) return;
+    pwdLoading.value = true;
+    try {
+      await changePasswordApi(pwdForm.oldPassword, pwdForm.newPassword);
+      ElMessage.success('密码修改成功，请重新登录');
+      pwdDialogVisible.value = false;
+      await authStore.logout();
+      router.push('/login');
+    } catch (e: any) {
+      const msg = e?.response?.data?.message || e?.message || '修改密码失败';
+      ElMessage.error(typeof msg === 'string' ? msg : '修改密码失败');
+    } finally {
+      pwdLoading.value = false;
+    }
+  });
+}
+
+/**
+ * 退出登录
+ */
+async function handleLogout() {
+  try {
+    await ElMessageBox.confirm('确认退出登录？', '提示', {
+      type: 'warning',
+    });
+  } catch {
+    return;
+  }
+  await authStore.logout();
+  ElMessage.success('已退出登录');
+  router.push('/login');
+}
+
+/**
+ * 跳转用户管理页
+ */
+function goUsers() {
+  router.push('/admin/users');
+}
+
+/**
+ * 跳转审计日志页
+ */
+function goAudit() {
+  router.push('/admin/audit');
+}
+
+/**
+ * 下拉菜单 command 分发
+ */
+function handleCommand(cmd: string) {
+  switch (cmd) {
+    case 'password':
+      openChangePassword();
+      break;
+    case 'logout':
+      handleLogout();
+      break;
+    case 'users':
+      goUsers();
+      break;
+    case 'audit':
+      goAudit();
+      break;
+  }
+}
+
+// 应用启动时从 localStorage 恢复登录态
+onMounted(() => {
+  authStore.restore();
+});
 </script>
 
 <template>
-  <div class="app-layout">
-    <!-- 顶部栏：Logo + 全局搜索框 + 上传快捷按钮 -->
+  <!-- 公共路由（如登录页）：仅渲染路由出口，不显示主布局 -->
+  <router-view v-if="isPublicRoute" />
+
+  <!-- 主布局：顶部栏 + 左侧分类树 + 主区路由出口 -->
+  <div v-else class="app-layout">
+    <!-- 顶部栏：Logo + 全局搜索框 + 上传快捷按钮 + 用户菜单 -->
     <header class="app-header">
       <div class="header-left">
         <el-button
@@ -84,10 +229,34 @@ function onSelectCategory(categoryId: string) {
         </el-input>
       </div>
       <div class="header-right">
-        <el-button type="primary" @click="quickUpload">
+        <!-- 上传文档按钮：仅 editor/admin 可见 -->
+        <el-button
+          v-permission="['editor', 'admin']"
+          type="primary"
+          @click="quickUpload"
+        >
           <el-icon class="el-icon--left"><Upload /></el-icon>
           上传文档
         </el-button>
+
+        <!-- 用户下拉菜单 -->
+        <el-dropdown trigger="click" @command="handleCommand">
+          <span class="user-trigger">
+            <el-avatar :size="28" class="user-avatar">{{ avatarText }}</el-avatar>
+            <span class="user-name">{{ authStore.user?.username || authStore.user?.email || '用户' }}</span>
+            <el-icon><ArrowDown /></el-icon>
+          </span>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="password">修改密码</el-dropdown-item>
+              <el-dropdown-item divided command="logout">退出登录</el-dropdown-item>
+              <template v-if="authStore.isAdmin">
+                <el-dropdown-item divided command="users">用户管理</el-dropdown-item>
+                <el-dropdown-item command="audit">审计日志</el-dropdown-item>
+              </template>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </div>
     </header>
 
@@ -105,6 +274,56 @@ function onSelectCategory(categoryId: string) {
         <router-view />
       </main>
     </div>
+
+    <!-- 修改密码对话框 -->
+    <el-dialog
+      v-model="pwdDialogVisible"
+      title="修改密码"
+      width="420px"
+      :close-on-click-modal="false"
+    >
+      <el-form
+        ref="pwdFormRef"
+        :model="pwdForm"
+        :rules="pwdRules"
+        label-position="top"
+      >
+        <el-form-item label="原密码" prop="oldPassword">
+          <el-input
+            v-model="pwdForm.oldPassword"
+            type="password"
+            show-password
+            clearable
+          />
+        </el-form-item>
+        <el-form-item label="新密码" prop="newPassword">
+          <el-input
+            v-model="pwdForm.newPassword"
+            type="password"
+            show-password
+            clearable
+          />
+        </el-form-item>
+        <el-form-item label="确认新密码" prop="confirmPassword">
+          <el-input
+            v-model="pwdForm.confirmPassword"
+            type="password"
+            show-password
+            clearable
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="pwdDialogVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="pwdLoading"
+          @click="submitChangePassword"
+        >
+          确认修改
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -165,8 +384,29 @@ body,
 .header-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   flex-shrink: 0;
+}
+.user-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: #fff;
+  outline: none;
+}
+.user-avatar {
+  background: #1890ff;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+}
+.user-name {
+  font-size: 14px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .app-body {
   flex: 1;

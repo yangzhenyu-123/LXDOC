@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
   Logger,
@@ -11,6 +12,14 @@ import { Document } from '../documents/document.entity';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { CategoryResponseDto } from './dto/category-response.dto';
+
+/**
+ * 当前登录用户的最小结构（仅用于权限校验）
+ */
+interface CurrentUser {
+  id: string;
+  role: string;
+}
 
 @Injectable()
 export class CategoriesService {
@@ -50,8 +59,12 @@ export class CategoriesService {
    * - parentId 为空：顶层分类，type 必填且必须是枚举之一
    * - parentId 提供：type 自动继承父级，dto.type 被忽略
    * - 同级（相同 parentId）下 name 不允许重复
+   * createdBy 记录创建者，用于后续编辑/删除权限校验
    */
-  async create(dto: CreateCategoryDto): Promise<CategoryResponseDto> {
+  async create(
+    dto: CreateCategoryDto,
+    currentUser: CurrentUser,
+  ): Promise<CategoryResponseDto> {
     let resolvedType: CategoryType;
 
     if (dto.parentId) {
@@ -85,6 +98,7 @@ export class CategoriesService {
       name: dto.name,
       type: resolvedType,
       sort: dto.sort ?? 0,
+      createdBy: currentUser.id,
     });
     const saved = await this.categoryRepo.save(entity);
     return this.toResponseDto(saved, []);
@@ -94,12 +108,19 @@ export class CategoriesService {
    * 更新分类
    * - 若修改 name，校验同级不重名
    * - type 不允许通过此接口修改
+   * 权限：admin 全权；editor 仅能改自己 createdBy 的分类；其他拒绝
+   * 注意：seedIfEmpty 创建的顶层分类 createdBy 为 null，仅 admin 可改
    */
-  async update(id: string, dto: UpdateCategoryDto): Promise<CategoryResponseDto> {
+  async update(
+    id: string,
+    dto: UpdateCategoryDto,
+    currentUser: CurrentUser,
+  ): Promise<CategoryResponseDto> {
     const category = await this.categoryRepo.findOne({ where: { id } });
     if (!category) {
       throw new NotFoundException(`分类 ${id} 不存在`);
     }
+    this.assertCanWrite(category, currentUser);
 
     if (dto.name !== undefined && dto.name !== category.name) {
       const duplicate = await this.categoryRepo.findOne({
@@ -123,12 +144,15 @@ export class CategoriesService {
    * 删除分类
    * - 存在子节点时拒绝
    * - 存在关联文档时拒绝
+   * 权限：admin 全权；editor 仅能删自己 createdBy 的分类；其他拒绝
+   * 注意：seedIfEmpty 创建的顶层分类 createdBy 为 null，仅 admin 可删
    */
-  async remove(id: string): Promise<void> {
+  async remove(id: string, currentUser: CurrentUser): Promise<void> {
     const category = await this.categoryRepo.findOne({ where: { id } });
     if (!category) {
       throw new NotFoundException(`分类 ${id} 不存在`);
     }
+    this.assertCanWrite(category, currentUser);
 
     const childCount = await this.categoryRepo.count({
       where: { parentId: id },
@@ -145,6 +169,26 @@ export class CategoriesService {
     }
 
     await this.categoryRepo.remove(category);
+  }
+
+  /**
+   * 校验当前用户是否可写指定分类
+   * - admin 全权
+   * - editor 仅当 category.createdBy === currentUser.id 时允许（createdBy 为 null 的种子分类仅 admin 可写）
+   * - 其他（含 viewer）拒绝
+   */
+  private assertCanWrite(category: Category, currentUser: CurrentUser): void {
+    if (currentUser.role === 'admin') {
+      return;
+    }
+    if (
+      currentUser.role === 'editor' &&
+      category.createdBy !== null &&
+      category.createdBy === currentUser.id
+    ) {
+      return;
+    }
+    throw new ForbiddenException('无权修改他人创建的分类');
   }
 
   /**

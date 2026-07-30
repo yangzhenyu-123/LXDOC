@@ -40,6 +40,11 @@ export class Category {
   @Column({ type: 'int', default: 0 })
   sort: number;
 
+  // 创建者用户 id（关联 users.id），用于权限判断
+  @Index()
+  @Column({ name: 'created_by', type: 'uuid', nullable: true })
+  createdBy: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
 }

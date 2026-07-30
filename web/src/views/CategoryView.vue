@@ -1,18 +1,21 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import type { UploadFile, UploadInstance, UploadUserFile } from 'element-plus';
 import { getCategoriesTree, type Category } from '@/api/categories';
 import { uploadDocument } from '@/api/uploads';
 import {
   listByCategory,
+  deleteDocument,
   type DocumentFormat,
   type DocumentListItem,
 } from '@/api/documents';
+import { useAuthStore } from '@/stores/auth';
 
 const route = useRoute();
 const router = useRouter();
+const authStore = useAuthStore();
 const categoryId = computed(() => String(route.params.categoryId ?? ''));
 const tree = ref<Category[]>([]);
 
@@ -216,6 +219,43 @@ function goDoc(id: string) {
   router.push(`/d/${id}`);
 }
 
+/**
+ * 判断当前用户是否可删除指定文档
+ * - admin 可删任意
+ * - editor 仅可删自己 createdBy 的文档
+ * - viewer 无删除权限
+ */
+function canDeleteDoc(doc: DocumentListItem): boolean {
+  if (!authStore.user) return false;
+  if (authStore.isAdmin) return true;
+  if (authStore.isEditor && doc.createdBy === authStore.user.id) return true;
+  return false;
+}
+
+/**
+ * 删除文档：二次确认后调用接口，成功刷新列表
+ */
+async function handleDeleteDoc(doc: DocumentListItem) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除文档「${doc.title}」？此操作不可恢复，将一并删除其所有历史版本与附件。`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    );
+  } catch {
+    return;
+  }
+  try {
+    await deleteDocument(doc.id);
+    ElMessage.success('文档已删除');
+    await loadDocuments();
+  } catch (err: any) {
+    const msg =
+      err?.response?.data?.message ?? err?.message ?? '删除文档失败';
+    ElMessage.error(`删除文档失败：${msg}`);
+  }
+}
+
 // 监听路由参数变化，重新加载文档列表
 watch(
   () => route.params.categoryId,
@@ -336,6 +376,20 @@ onMounted(async () => {
       </el-table-column>
       <el-table-column label="版本" width="90" align="center">
         <template #default="{ row }">v{{ row.version }}</template>
+      </el-table-column>
+      <el-table-column label="操作" width="100" align="center" fixed="right">
+        <template #default="{ row }">
+          <el-button
+            v-if="canDeleteDoc(row)"
+            type="danger"
+            size="small"
+            text
+            @click="handleDeleteDoc(row)"
+          >
+            删除
+          </el-button>
+          <span v-else class="muted">—</span>
+        </template>
       </el-table-column>
       <template #empty>
         <el-empty description="该分类下暂无文档，点击上方上传按钮添加" />

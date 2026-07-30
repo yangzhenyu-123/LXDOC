@@ -61,10 +61,10 @@ export class Document {
   @Column({ type: 'text', array: true, default: '{}' })
   tags: string[];
 
-  // 预留多用户字段
+  // 创建者用户 id（关联 users.id），用于"我的文档"视图与权限判断
   @Index()
-  @Column({ name: 'user_id', type: 'uuid', nullable: true })
-  userId: string | null;
+  @Column({ name: 'created_by', type: 'uuid', nullable: true })
+  createdBy: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

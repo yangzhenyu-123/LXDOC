@@ -68,6 +68,7 @@ export class UploadsService {
   async ingest(
     file: Express.Multer.File,
     categoryId: string,
+    userId: string,
   ): Promise<Document> {
     if (!file) {
       throw new BadRequestException('未提供上传文件');
@@ -94,6 +95,7 @@ export class UploadsService {
       path.basename(file.originalname, ext) || file.originalname;
 
     // 1. 先创建 Document 行（content=null, originalPath=null, version=1）
+    // createdBy 记录上传者，用于权限校验与"我的文档"视图
     const doc = this.documentRepo.create({
       categoryId,
       title,
@@ -101,6 +103,7 @@ export class UploadsService {
       format,
       originalPath: null,
       version: 1,
+      createdBy: userId,
     });
     const saved = await this.documentRepo.save(doc);
     const docId = saved.id;

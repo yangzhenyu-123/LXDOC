@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -9,12 +10,21 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { Document, DocumentFormat } from './document.entity';
 import { DocumentVersion } from './document-version.entity';
 import { Category } from '../categories/category.entity';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { getUploadDir } from '../config/upload.config';
+
+/**
+ * 当前登录用户的最小结构（仅用于权限校验）
+ */
+interface CurrentUser {
+  id: string;
+  role: string;
+}
 
 /**
  * 文档版本列表响应（不含 content，避免大响应）
@@ -44,6 +54,7 @@ export interface DocumentListItem {
   version: number;
   tags: string[];
   updatedAt: Date;
+  createdBy: string | null;
 }
 
 @Injectable()
@@ -159,9 +170,15 @@ export class DocumentsService {
    * 更新文档（事务）
    * 1. 写入当前内容的版本快照（version=当前 version，若已存在则跳过）
    * 2. 更新 Document 的 title/content/tags（若提供），version + 1
+   * 权限：admin 全权；editor 仅能改自己 createdBy 的文档；其他拒绝
    */
-  async update(id: string, dto: UpdateDocumentDto): Promise<Document> {
+  async update(
+    id: string,
+    dto: UpdateDocumentDto,
+    currentUser: CurrentUser,
+  ): Promise<Document> {
     const doc = await this.findOne(id);
+    this.assertCanWrite(doc, currentUser);
 
     return this.entityManager.transaction(async (manager) => {
       const docRepo = manager.getRepository(Document);
@@ -245,9 +262,15 @@ export class DocumentsService {
    * 1. 找到目标版本的 content
    * 2. 写入当前内容快照（version=当前 version，若已存在则跳过）
    * 3. 更新 Document.content = 目标 content、version + 1
+   * 权限：admin 全权；editor 仅能回滚自己 createdBy 的文档；其他拒绝
    */
-  async rollback(id: string, version: number): Promise<Document> {
+  async rollback(
+    id: string,
+    version: number,
+    currentUser: CurrentUser,
+  ): Promise<Document> {
     const doc = await this.findOne(id);
+    this.assertCanWrite(doc, currentUser);
     const target = await this.versionRepo.findOne({
       where: { documentId: id, version },
     });
@@ -289,6 +312,55 @@ export class DocumentsService {
   }
 
   /**
+   * 删除文档（事务）
+   * 1. 校验权限：admin 全权；editor 仅可删自己 createdBy 的文档；其他拒绝
+   * 2. 删除关联的 DocumentVersion 记录
+   * 3. 删除 Document 记录
+   * 4. best-effort 清理磁盘上的原文件与图片目录（失败仅记日志，不阻断删除）
+   */
+  async remove(
+    id: string,
+    currentUser: CurrentUser,
+  ): Promise<void> {
+    const doc = await this.findOne(id);
+    this.assertCanWrite(doc, currentUser);
+
+    await this.entityManager.transaction(async (manager) => {
+      const docRepo = manager.getRepository(Document);
+      const versionRepo = manager.getRepository(DocumentVersion);
+      // 先删版本，再删文档
+      await versionRepo.delete({ documentId: id });
+      await docRepo.delete(id);
+    });
+
+    // best-effort 清理磁盘文件，失败不影响删除结果
+    this.cleanupDocFiles(id, doc.originalPath).catch((err) => {
+      this.logger.error(
+        `清理文档文件失败 docId=${id}：${(err as Error).message}`,
+      );
+    });
+  }
+
+  /**
+   * 清理文档对应的磁盘文件：original/<docId>/ 与 images/<docId>/
+   * 文件缺失不视为错误（rm recursive + force）
+   */
+  private async cleanupDocFiles(
+    docId: string,
+    originalPath: string | null,
+  ): Promise<void> {
+    const uploadDir = getUploadDir();
+    // 删除 original/<docId>/ 目录（含原文件与历史临时文件）
+    const originalDir = path.join(uploadDir, 'original', docId);
+    await fs.rm(originalDir, { recursive: true, force: true });
+    // 删除 images/<docId>/ 目录（Pandoc 抽取的图片与编辑器上传的图片）
+    const imagesDir = path.join(uploadDir, 'images', docId);
+    await fs.rm(imagesDir, { recursive: true, force: true });
+    // originalPath 为空时无需额外处理（已被目录删除覆盖）
+    void originalPath;
+  }
+
+  /**
    * 列出最近更新的 N 篇文档（按 updatedAt DESC），不含 content
    * limit 上限 50，避免一次拉取过多
    */
@@ -303,6 +375,7 @@ export class DocumentsService {
         'd.version',
         'd.tags',
         'd.updatedAt',
+        'd.createdBy',
       ])
       .orderBy('d.updatedAt', 'DESC')
       .limit(safeLimit)
@@ -315,6 +388,7 @@ export class DocumentsService {
       version: d.version,
       tags: d.tags ?? [],
       updatedAt: d.updatedAt,
+      createdBy: d.createdBy,
     }));
   }
 
@@ -342,6 +416,7 @@ export class DocumentsService {
         'd.version',
         'd.tags',
         'd.updatedAt',
+        'd.createdBy',
       ])
       .where('d.category_id IN (:...ids)', { ids: categoryIds })
       .orderBy('d.updatedAt', 'DESC')
@@ -354,7 +429,29 @@ export class DocumentsService {
       version: d.version,
       tags: d.tags ?? [],
       updatedAt: d.updatedAt,
+      createdBy: d.createdBy,
     }));
+  }
+
+  /**
+   * 校验当前用户是否可写指定文档
+   * - admin 全权
+   * - editor 仅当 document.createdBy === currentUser.id 时允许
+   * - 其他（含 viewer）拒绝
+   * 注意：findOne（GET 单个）等读操作不走此校验，所有登录用户可读任意文档（MVP 不做文档级读权限）
+   */
+  private assertCanWrite(doc: Document, currentUser: CurrentUser): void {
+    if (currentUser.role === 'admin') {
+      return;
+    }
+    if (
+      currentUser.role === 'editor' &&
+      doc.createdBy !== null &&
+      doc.createdBy === currentUser.id
+    ) {
+      return;
+    }
+    throw new ForbiddenException('无权修改他人文档');
   }
 
   /**

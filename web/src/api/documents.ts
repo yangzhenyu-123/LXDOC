@@ -11,10 +11,12 @@ export interface Document {
   content: string | null;
   format: DocumentFormat;
   originalPath: string | null;
+  pages: number | null;
   version: number;
   author: string;
   tags: string[];
-  userId: string | null;
+  // 创建者用户 id，用于前端权限判断（editor 仅可改/删自己创建的）
+  createdBy: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -41,6 +43,8 @@ export interface DocumentListItem {
   version: number;
   tags: string[];
   updatedAt: string;
+  // 创建者用户 id，用于前端判断 editor 是否可删
+  createdBy: string | null;
 }
 
 // 更新文档请求体
@@ -79,6 +83,14 @@ export function updateDocument(
   payload: UpdateDocumentPayload,
 ): Promise<Document> {
   return client.put<Document, Document>(`/documents/${id}`, payload);
+}
+
+/**
+ * 删除文档（editor+，editor 仅可删自己创建的，由后端校验）
+ * DELETE /documents/:id
+ */
+export function deleteDocument(id: string): Promise<void> {
+  return client.delete<void, void>(`/documents/${id}`);
 }
 
 /**

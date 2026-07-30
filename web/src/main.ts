@@ -6,6 +6,7 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue';
 
 import App from './App.vue';
 import router from './router';
+import { vPermission } from './directives/permission';
 
 const app = createApp(App);
 
@@ -15,6 +16,9 @@ app.use(createPinia());
 app.use(router);
 // 注册 Element Plus 组件库
 app.use(ElementPlus);
+
+// 全局注册权限指令 v-permission
+app.directive('permission', vPermission);
 
 // 全局注册所有 Element Plus 图标组件
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
