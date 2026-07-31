@@ -120,6 +120,8 @@ docker compose up -d
 | frontend | 8080 | 前端 Web 入口（nginx 托管 + 反代 /api、/onlyoffice） |
 | backend | 3000 | 后端 NestJS API |
 | onlyoffice | 8081 | OnlyOffice Document Server |
+| pdf2html | 7000 | pdf2htmlEX sidecar（PDF 版式预览，仅内网） |
+| docling | 5001 | docling-serve sidecar（文档解析，仅内网，可选） |
 | postgres | 5432 | PostgreSQL 数据库 |
 
 ## 本地开发

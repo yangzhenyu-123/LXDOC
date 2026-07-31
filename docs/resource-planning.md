@@ -10,7 +10,7 @@
 | backend | lxdoc-backend | 2g | 2 | NestJS API + 文档解析 + LLM 调用 + LibreOffice/soffice 转换 | 经 nginx 反代 |
 | onlyoffice | documentserver:8.2 | 2g | 2 | docx/odt 原格式在线编辑 | 经 nginx 反代 |
 | pdf2html | lxdoc-pdf2html | 1g | 1 | PDF→版式 HTML sidecar | 否（仅内部） |
-| docling | docling-serve:cpu-latest | 4g | 2 | 统一文档解析（PDF 图片/表格/OCR）sidecar，可选 | 否（仅 internal） |
+| docling | quay.io/docling-project/docling-serve:cpu-latest | 4g | 2 | 统一文档解析（PDF 图片/表格/OCR）sidecar，官方镜像，可选 | 否（仅 internal） |
 | frontend | lxdoc-frontend | 512m | 1 | nginx 静态站 + 反代 | 8080 对外 |
 
 > 不含 docling 时容器资源限制总和约 **6.5 GB**；启用 docling（`DOCLING_ENABLED=true`）后增至 **10.5 GB**。docling 为可选 sidecar，不启用时上传回退本地 pandoc/pdf-parse。
@@ -68,7 +68,8 @@
 
 | 项 | 大小 |
 |----|------|
-| 5 个镜像合计 | ~4–5 GB |
+| 5 个镜像合计（不含 docling） | ~4–5 GB |
+| 启用 docling 后 +1 个镜像 | ~+2 GB（含模型缓存，首次下载持久化在 volume） |
 | Postgres 初始数据 | <100 MB |
 | OnlyOffice 字体+缓存 | 1–2 GB |
 | uploads（按用户使用） | 不定，建议按 1 GB / 100 文档预估 |

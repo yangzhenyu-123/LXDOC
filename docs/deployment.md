@@ -21,6 +21,7 @@ docker compose up -d
 | `backend` | 3000 | NestJS API |
 | `onlyoffice` | 8081 | OnlyOffice Document Server |
 | `pdf2html` | 7000 | pdf2htmlEX sidecar（PDF 版式预览，仅内网） |
+| `docling` | 5001 | docling-serve sidecar（统一文档解析，仅内网，可选） |
 | `postgres` | 5432 | PostgreSQL 16 |
 
 启动后访问 http://localhost:8080，默认管理员 `admin@lxdoc.local` / `lxdoc12345`。
@@ -38,7 +39,7 @@ docker pull ghcr.io/yangzhenyu-123/lxdoc-pdf2html:latest
 # 指定版本：ghcr.io/yangzhenyu-123/lxdoc-backend:v1.0.0
 ```
 
-镜像版本列表见 [GHCR Packages](https://github.com/yangzhenyu-123?tab=packages)。onlyoffice / postgres 使用官方镜像，无需自行拉取。
+镜像版本列表见 [GHCR Packages](https://github.com/yangzhenyu-123?tab=packages)。onlyoffice / postgres / docling 使用官方镜像，无需自行拉取。
 
 ## CI 自动发布
 
@@ -57,7 +58,7 @@ git push origin v1.0.0
 
 **镜像命名**：`ghcr.io/yangzhenyu-123/lxdoc-<name>:<tag>`（name = backend / frontend / pdf2html）
 
-**自定义镜像源**：在 `.env` 设置 `LXDOC_IMAGE_PREFIX` 覆盖默认前缀（如内网镜像源 `registry.internal/lxdoc`）。
+**自定义镜像源**：在 `.env` 设置 `LXDOC_IMAGE_PREFIX` 覆盖默认前缀（如内网镜像源 `registry.internal/your-org`，拼接后为 `registry.internal/your-org/lxdoc-backend`）。
 
 > 仅构建 `linux/amd64`：pdf2html 的 AppImage 仅为 amd64，arm64 需自行从源码构建（见 [PDF 版式预览](#pdf-版式预览pdf2htmlex-sidecar)）。
 
@@ -100,7 +101,7 @@ LXDOC 上传文档采用「docling 为主 + 本地回退」双层解析，支持
 
 ### onlyoffice
 
-- 镜像 `onlyoffice/documentserver:latest`（AGPL 许可，仅自用/内部部署合规）
+- 镜像 `onlyoffice/documentserver:8.2`（固定版本标签，AGPL 许可，仅自用/内部部署合规）
 - `JWT_ENABLED=true` + `JWT_SECRET` 与后端 `ONLYOFFICE_JWT_SECRET` 共享
 - 持久化卷：`onlyoffice-data`（文档转换缓存与字体）、`onlyoffice-cache`
 - 端口 8081:80，前端经 nginx 反代为同源 `/onlyoffice`
