@@ -2,12 +2,154 @@
 
 本文描述 LXDOC 的部署方式、环境变量、OnlyOffice / PDF 工具配置与常见问题。
 
-## 一键部署（Docker Compose）
+## 快速开始（无需克隆仓库，推荐非开发者）
+
+只需下载一个 compose 文件、填写 4 个必填项即可启动，全部使用 GHCR 预构建镜像，**不需要源码、不需要编译**。
+
+### 前置要求
+
+- Docker 20.10+ 与 Docker Compose v2（`docker compose` 命令）
+- 服务器：**4 核 / 8 GB / 50 GB SSD** 起步（详见 [部署资源规划](./resource-planning.md)）
+- 端口 8080 可用（对外访问入口）
+- 可访问 `ghcr.io` 拉取镜像（内网无外网时需先手动导入镜像，见下文「离线部署」）
+
+### 步骤 1：下载编排文件
+
+只需一个文件，无需克隆整个仓库：
+
+```bash
+mkdir lxdoc && cd lxdoc
+# 下载快速启动编排文件（仓库 raw 地址，也可手动下载后放入该目录）
+curl -fsSL -o docker-compose.quickstart.yml \
+  https://raw.githubusercontent.com/yangzhenyu-123/LXDOC/main/docker-compose.quickstart.yml
+```
+
+> 若服务器无法访问 GitHub，可在任意能联网的机器上下载该文件，再拷贝到服务器。文件内容见仓库根目录 `docker-compose.quickstart.yml`。
+
+### 步骤 2：创建 .env 并填写必填项
+
+在 compose 文件同目录创建 `.env` 文件，**必须**填写以下 4 个值（不填或留默认值，后端启动会直接拒绝）：
+
+```bash
+cat > .env <<'EOF'
+# ===== 以下 4 项必填，未设置后端拒绝启动 =====
+# 数据库密码（自定义强密码）
+POSTGRES_PASSWORD=请改成你的强密码
+# JWT 签名密钥（生成：openssl rand -hex 32）
+JWT_SECRET=请用 openssl rand -hex 32 生成
+# OnlyOffice JWT 密钥（生成：openssl rand -hex 32）
+ONLYOFFICE_JWT_SECRET=请用 openssl rand -hex 32 生成
+# 初始管理员密码（首次启动 seed 用，之后可登录修改）
+ADMIN_PASSWORD=请改成你的强密码
+
+# ===== 以下可选，按需修改 =====
+# 管理员邮箱（默认 admin@lxdoc.local）
+ADMIN_EMAIL=admin@lxdoc.local
+# 是否开放自注册（默认 false，仅管理员可创建用户）
+ALLOW_SIGNUP=false
+# 镜像版本（默认 latest，固定版本如 v0.2.0）
+# LXDOC_IMAGE_TAG=v0.2.0
+EOF
+```
+
+> 三个密钥务必用 `openssl rand -hex 32` 生成强随机值，不要使用示例文本。
+
+### 步骤 3：启动
+
+```bash
+docker compose -f docker-compose.quickstart.yml up -d
+```
+
+首次启动会拉取镜像（约 4-5 GB）并初始化 OnlyOffice 字体，约 3-5 分钟。查看启动进度：
+
+```bash
+docker compose -f docker-compose.quickstart.yml logs -f backend
+```
+
+看到 `LXDOC 后端服务已启动` 即可访问。
+
+### 步骤 4：访问与登录
+
+- 地址：http://localhost:8080（如部署在远程服务器，把 localhost 换成服务器 IP）
+- 登录：邮箱 `admin@lxdoc.local`（或你在 `.env` 中设置的 `ADMIN_EMAIL`），密码为 `ADMIN_PASSWORD` 的值
+- **登录后请立即在右上角用户菜单修改密码**
+
+### 常用运维命令
+
+```bash
+# 查看所有服务状态
+docker compose -f docker-compose.quickstart.yml ps
+
+# 查看某服务日志（-f 实时跟踪）
+docker compose -f docker-compose.quickstart.yml logs -f backend
+
+# 停止（保留数据）
+docker compose -f docker-compose.quickstart.yml down
+
+# 启动
+docker compose -f docker-compose.quickstart.yml up -d
+
+# 升级版本（修改 .env 中 LXDOC_IMAGE_TAG 后）
+docker compose -f docker-compose.quickstart.yml pull
+docker compose -f docker-compose.quickstart.yml up -d
+
+# 备份数据库
+docker exec lxdoc-postgres pg_dump -U lxdoc lxdoc > backup-$(date +%F).sql
+
+# 备份上传文件（原文件 + 图片）
+tar czf uploads-$(date +%F).tar.gz uploads/
+```
+
+### 快速启动包含的服务
+
+| 服务 | 端口 | 说明 |
+|---|---|---|
+| `frontend` | 8080 | nginx 托管前端 + 反代 `/api`、`/onlyoffice` |
+| `backend` | 3000 | NestJS API（不对外，经 nginx 反代） |
+| `onlyoffice` | 8081 | OnlyOffice Document Server（不对外，经 nginx 反代） |
+| `pdf2html` | 7000 | pdf2htmlEX sidecar（仅内网） |
+| `postgres` | 5432 | PostgreSQL 16（仅内网） |
+
+> 仅 `8080` 对外暴露，其余服务均在内部网络，最小攻击面。
+
+### 快速启动不包含的功能
+
+快速启动编排追求最小可用，以下功能需改用完整编排（见下文「从源码部署」）：
+
+- **docling 文档解析**（PDF 图片/表格/OCR）：默认关闭，上传回退本地 pdf-parse。需要时改用完整 `docker-compose.yml` 并设 `DOCLING_ENABLED=true`
+- **AI 总结**：默认关闭。需要时在 `.env` 配置 `LLM_ENABLED=true` + `LLM_BASE_URL` 指向内网 GLM 端点
+- **API 调试文档**：默认关闭。需要时在 `.env` 设 `ENABLE_API_DOCS=true`
+
+### 离线部署（内网无外网）
+
+1. 在能联网的机器拉取镜像并导出：
+   ```bash
+   docker pull ghcr.io/yangzhenyu-123/lxdoc-backend:latest
+   docker pull ghcr.io/yangzhenyu-123/lxdoc-frontend:latest
+   docker pull ghcr.io/yangzhenyu-123/lxdoc-pdf2html:latest
+   docker pull onlyoffice/documentserver:8.2
+   docker pull postgres:16-alpine
+   docker save -o lxdoc-images.tar \
+     ghcr.io/yangzhenyu-123/lxdoc-backend:latest \
+     ghcr.io/yangzhenyu-123/lxdoc-frontend:latest \
+     ghcr.io/yangzhenyu-123/lxdoc-pdf2html:latest \
+     onlyoffice/documentserver:8.2 \
+     postgres:16-alpine
+   ```
+2. 将 `lxdoc-images.tar`、`docker-compose.quickstart.yml` 拷贝到内网服务器
+3. 内网服务器导入镜像：`docker load -i lxdoc-images.tar`
+4. 后续步骤同上（创建 `.env`、`docker compose ... up -d`）
+
+---
+
+## 从源码部署（开发者 / 需完整功能）
+
+适合需要本地构建、启用 docling、或定制 Dockerfile 的场景。
 
 ```bash
 git clone <repo> LXDOC && cd LXDOC
 cp .env.example .env
-# 编辑 .env：必须设置 POSTGRES_PASSWORD / JWT_SECRET / ONLYOFFICE_JWT_SECRET
+# 编辑 .env：必须设置 POSTGRES_PASSWORD / JWT_SECRET / ONLYOFFICE_JWT_SECRET / ADMIN_PASSWORD
 docker compose up -d
 ```
 
@@ -24,11 +166,11 @@ docker compose up -d
 | `docling` | 5001 | docling-serve sidecar（统一文档解析，仅内网，可选） |
 | `postgres` | 5432 | PostgreSQL 16 |
 
-启动后访问 http://localhost:8080，默认管理员 `admin@lxdoc.local` / `lxdoc12345`。
+启动后访问 http://localhost:8080，默认管理员 `admin@lxdoc.local` / `lxdoc12345`（开发环境；生产需在 `.env` 设置 `ADMIN_PASSWORD`）。
 
 > OnlyOffice 镜像较大且首次需初始化字体，可能耗时 1~2 分钟。可用 `docker logs -f lxdoc-onlyoffice` 观察就绪状态。
 
-### 直接拉取镜像（无需克隆仓库）
+### 直接拉取镜像
 
 CI 自动构建的镜像托管在 GHCR（公开），可直接拉取：
 

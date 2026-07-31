@@ -1,0 +1,151 @@
+# LXDOC 快速启动编排（面向非开发者，无需克隆仓库）
+#
+# 用法：
+#   1. 下载本文件与 .env（见下方模板）
+#   2. 编辑 .env 设置三个必填密钥
+#   3. docker compose -f docker-compose.quickstart.yml up -d
+#   4. 浏览器访问 http://localhost:8080
+#
+# 与 docker-compose.yml 的区别：
+#   - 仅拉取 GHCR 预构建镜像，无 build 块，无需源码
+#   - 不含 docling（可选 sidecar，需要时改用完整 docker-compose.yml）
+#   - 配置最小化，必填项强校验，开箱即用
+#
+# 完整配置项见 docker-compose.yml 与 docs/deployment.md
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lxdoc-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lxdoc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须在 .env 中设置数据库密码}
+      POSTGRES_DB: ${POSTGRES_DB:-lxdoc}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lxdoc} -d ${POSTGRES_DB:-lxdoc}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: 2
+    networks:
+      - internal
+
+  backend:
+    image: ${LXDOC_IMAGE_PREFIX:-ghcr.io/yangzhenyu-123}/lxdoc-backend:${LXDOC_IMAGE_TAG:-latest}
+    container_name: lxdoc-backend
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-lxdoc}
+      DB_PASS: ${POSTGRES_PASSWORD:?必须在 .env 中设置数据库密码}
+      DB_NAME: ${POSTGRES_DB:-lxdoc}
+      UPLOAD_DIR: /app/uploads
+      # 三个必填密钥（未设置或为默认值，后端启动会拒绝）
+      JWT_SECRET: ${JWT_SECRET:?必须在 .env 中设置 JWT_SECRET（强随机值）}
+      JWT_ACCESS_EXPIRES: ${JWT_ACCESS_EXPIRES:-15m}
+      JWT_REFRESH_EXPIRES: ${JWT_REFRESH_EXPIRES:-7d}
+      ALLOW_SIGNUP: ${ALLOW_SIGNUP:-false}
+      FILE_TOKEN_EXPIRES: ${FILE_TOKEN_EXPIRES:-10m}
+      ONLYOFFICE_ENABLED: ${ONLYOFFICE_ENABLED:-true}
+      ONLYOFFICE_URL: http://onlyoffice
+      ONLYOFFICE_PUBLIC_URL: /onlyoffice
+      BACKEND_PUBLIC_URL: http://backend:3000
+      ONLYOFFICE_JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:?必须在 .env 中设置 OnlyOffice JWT secret}
+      PDF2HTML_URL: http://pdf2html:7000
+      SOFFICE_BIN: soffice
+      # LLM 默认关闭；需要 AI 总结时在 .env 开启并配置内网 GLM 端点
+      LLM_ENABLED: ${LLM_ENABLED:-false}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://internal-glm/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-glm-5.2}
+      # API 调试文档默认关闭，需要时在 .env 设 true
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
+      # 首次启动 seed 管理员（生产必填，否则拒绝启动；见 docs/deployment.md）
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@lxdoc.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?必须在 .env 中设置管理员初始密码}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pdf2html:
+        condition: service_started
+    volumes:
+      - ./uploads:/app/uploads
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    mem_limit: 2g
+    cpus: 2
+    networks:
+      - default
+      - internal
+
+  onlyoffice:
+    image: onlyoffice/documentserver:8.2
+    container_name: lxdoc-onlyoffice
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:?必须在 .env 中设置 OnlyOffice JWT secret}
+      USE_UNAUTHORIZED_STORAGE: "false"
+    volumes:
+      - onlyoffice-data:/var/www/onlyoffice/Data
+      - onlyoffice-cache:/var/lib/onlyoffice
+    expose:
+      - "80"
+    restart: unless-stopped
+    mem_limit: 2g
+    cpus: 2
+
+  pdf2html:
+    image: ${LXDOC_IMAGE_PREFIX:-ghcr.io/yangzhenyu-123}/lxdoc-pdf2html:${LXDOC_IMAGE_TAG:-latest}
+    container_name: lxdoc-pdf2html
+    expose:
+      - "7000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:7000/health',timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1
+
+  frontend:
+    image: ${LXDOC_IMAGE_PREFIX:-ghcr.io/yangzhenyu-123}/lxdoc-frontend:${LXDOC_IMAGE_TAG:-latest}
+    container_name: lxdoc-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1
+
+networks:
+  default:
+  internal:
+    internal: true
+
+volumes:
+  postgres-data:
+  onlyoffice-data:
+  onlyoffice-cache:

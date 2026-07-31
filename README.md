@@ -2,6 +2,30 @@
 
 LXDOC 是一个面向企业的知识库管理系统，支持 Markdown / TXT / DOCX / ODT / PDF 等多种文档格式的上传、解析、在线编辑与全文检索。内置「部门 / 组 / 个人」三层组织权限体系，docx 接入 OnlyOffice 原格式编辑，PDF 支持版式保真预览与一键转可编辑，并预留内网 GLM 大模型接入骨架。
 
+## 快速启动（无需克隆源码）
+
+只需下载一个 compose 文件、填写 4 个必填密钥即可启动，全部使用预构建镜像，**不需要源码、不需要编译**。
+
+```bash
+mkdir lxdoc && cd lxdoc
+curl -fsSL -o docker-compose.quickstart.yml \
+  https://raw.githubusercontent.com/yangzhenyu-123/LXDOC/main/docker-compose.quickstart.yml
+
+# 创建 .env，填写 4 个必填项（POSTGRES_PASSWORD / JWT_SECRET / ONLYOFFICE_JWT_SECRET / ADMIN_PASSWORD）
+cat > .env <<'EOF'
+POSTGRES_PASSWORD=改成你的强密码
+JWT_SECRET=用 openssl rand -hex 32 生成
+ONLYOFFICE_JWT_SECRET=用 openssl rand -hex 32 生成
+ADMIN_PASSWORD=改成你的强密码
+EOF
+
+docker compose -f docker-compose.quickstart.yml up -d
+```
+
+启动后访问 http://localhost:8080，用 `admin@lxdoc.local` + `ADMIN_PASSWORD` 登录。
+
+> 详细步骤、离线部署、运维命令见 [部署指南](./docs/deployment.md#快速开始无需克隆仓库推荐非开发者)。需完整功能（docling 文档解析 / AI 总结）改用 `docker-compose.yml`。
+
 ## 核心特性
 
 - **组织层级权限**：通用组织树（部门 > 组）+ 个人私有空间；每层有读权限，编辑需对应编辑授权；基于物化路径的权限继承，免递归查询。
@@ -70,9 +94,13 @@ LXDOC/
 | [docs/llm.md](./docs/llm.md) | LLM Provider 抽象、GLM5.2 接入、规划路线 |
 | [docs/api-reference.md](./docs/api-reference.md) | 后端接口清单 |
 
-## 一键启动
+## 一键启动（克隆仓库后）
+
+已克隆仓库的用户可直接用完整编排（含 docling/AI 总结等可选功能）：
 
 ```bash
+cp .env.example .env
+# 编辑 .env：必须设置 POSTGRES_PASSWORD / JWT_SECRET / ONLYOFFICE_JWT_SECRET / ADMIN_PASSWORD
 docker compose up -d
 ```
 
@@ -83,7 +111,7 @@ docker compose up -d
 - OnlyOffice：http://localhost:8081（经前端 nginx 反代为 `/onlyoffice`）
 - PostgreSQL：localhost:5432
 
-> 首次启动 OnlyOffice 镜像较大且需初始化字体，可能耗时 1~2 分钟。
+> 首次启动 OnlyOffice 镜像较大且需初始化字体，可能耗时 1~2 分钟。非开发者建议用上文「快速启动」方式，无需克隆源码。
 
 ## 首次登录
 
