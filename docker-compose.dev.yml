@@ -1,0 +1,86 @@
+# LXDOC 本地开发依赖服务编排
+#
+# 用途：开发者本地跑后端（pnpm dev:3000）+ 前端（pnpm dev:5173）热重载，
+#       用本文件启动其余依赖服务（postgres/onlyoffice/pdf2html/docling），
+#       即可测试全部功能（文档编辑/版式预览/解析/AI 总结）。
+#
+# 启动：docker compose -f docker-compose.dev.yml up -d
+# 停止：docker compose -f docker-compose.dev.yml down
+#
+# 与 docker-compose.yml 的区别：
+#   - 不含 backend/frontend（本地 pnpm dev 跑，享受热重载）
+#   - postgres/onlyoffice/pdf2html 端口映射到宿主机，方便本地直连
+#   - OnlyOffice 通过 host.docker.internal 回调本地后端（BACKEND_PUBLIC_URL）
+#   - docling 默认启动（可选，不测解析可 docker compose ... stop docling）
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lxdoc-dev-postgres
+    environment:
+      POSTGRES_USER: lxdoc
+      POSTGRES_PASSWORD: lxdoc
+      POSTGRES_DB: lxdoc
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lxdoc -d lxdoc"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  onlyoffice:
+    image: onlyoffice/documentserver:8.2
+    container_name: lxdoc-dev-onlyoffice
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: lxdoc-onlyoffice-dev-secret
+    ports:
+      - "8081:80"
+    volumes:
+      - onlyoffice-dev-data:/var/www/onlyoffice/Data
+      - onlyoffice-dev-cache:/var/lib/onlyoffice
+    # OnlyOffice 需回调本地后端（宿主机 3000），通过 host.docker.internal 访问
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    mem_limit: 2g
+
+  pdf2html:
+    image: ${LXDOC_IMAGE_PREFIX:-ghcr.io/yangzhenyu-123}/lxdoc-pdf2html:${LXDOC_IMAGE_TAG:-latest}
+    container_name: lxdoc-dev-pdf2html
+    ports:
+      - "7000:7000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:7000/health',timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # docling 为可选：不测文档解析（PDF 图片/表格）可 docker compose -f docker-compose.dev.yml stop docling
+  docling:
+    image: quay.io/docling-project/docling-serve:cpu-latest
+    container_name: lxdoc-dev-docling
+    ports:
+      - "5001:5001"
+    volumes:
+      - docling-dev-models:/root/.cache/docling
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5001/health',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    mem_limit: 4g
+
+volumes:
+  postgres-dev-data:
+  onlyoffice-dev-data:
+  onlyoffice-dev-cache:
+  docling-dev-models:

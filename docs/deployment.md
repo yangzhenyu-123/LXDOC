@@ -346,49 +346,171 @@ pandoc libreoffice poppler-utils fonts-noto-cjk
 
 > 注：该 AppImage 仅为 x86_64。arm64 部署需自行从源码构建 pdf2htmlEX。
 
-## 本地开发
+## 本地开发（完整功能测试）
 
-### 后端
+开发者本地跑后端 + 前端热重载，依赖服务（postgres / onlyoffice / pdf2html / docling）用 `docker-compose.dev.yml` 一键启动，即可测试全部功能。
+
+### 前置依赖
+
+- Node.js 20+、pnpm 9+
+- Docker + Docker Compose v2
+- 系统二进制：`pandoc`（PDF 转可编辑 + docx/odt 回退解析需要）
+  - macOS：`brew install pandoc`
+  - Linux：`apt install pandoc`
+  - Windows：建议 WSL2，`apt install pandoc`
+- 可选：`libreoffice`（PDF 转可编辑的 soffice，macOS 装 LibreOffice.app，Linux `apt install libreoffice`）
+  - 未装时 PDF「转可编辑」功能不可用，其余功能不受影响
+
+### 步骤 1：启动依赖服务
+
+```bash
+docker compose -f docker-compose.dev.yml up -d
+```
+
+启动的服务（端口均映射到宿主机，方便本地直连）：
+
+| 服务 | 宿主机端口 | 用途 |
+|------|-----------|------|
+| postgres | 5432 | 数据库（用户/密码/db 均为 `lxdoc`） |
+| onlyoffice | 8081 | docx/odt 编辑 |
+| pdf2html | 7000 | PDF 版式预览 |
+| docling | 5001 | 文档解析（可选，不测可 `stop docling`） |
+
+> docling 首次启动下载模型约 2GB，耗时较长；不测文档解析可先 `docker compose -f docker-compose.dev.yml stop docling`。
+
+### 步骤 2：配置后端 .env
 
 ```bash
 cd server
 cp .env.example .env
+```
+
+编辑 `server/.env`，关键调整（本地开发默认值已可用，仅需改以下几项适配本地网络）：
+
+```bash
+# 数据库指向本地映射的 postgres
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=lxdoc
+DB_PASS=lxdoc
+DB_NAME=lxdoc
+
+# OnlyOffice 回调本地后端：容器内通过 host.docker.internal 访问宿主机
+BACKEND_PUBLIC_URL=http://host.docker.internal:3000
+# OnlyOffice 容器地址（本地直连映射端口）
+ONLYOFFICE_URL=http://localhost:8081
+
+# PDF 版式预览：指向本地映射的 pdf2html
+PDF2HTML_URL=http://localhost:7000
+
+# 文档解析：启用 docling（不测可保持 false）
+DOCLING_ENABLED=true
+DOCLING_URL=http://localhost:5001
+
+# AI 总结：有内网 GLM 端点时开启（无则保持 false，总结接口会返回 503）
+# LLM_ENABLED=true
+# LLM_BASE_URL=http://your-glm-endpoint/v1
+```
+
+> 本地开发 `NODE_ENV` 未设置（非 production），故 `JWT_SECRET` / `ONLYOFFICE_JWT_SECRET` 可用默认值，后端不会强校验；`ADMIN_PASSWORD` 也无需设置，会用默认 `lxdoc12345`。
+
+### 步骤 3：启动后端
+
+```bash
+cd server
 pnpm install
 pnpm dev          # 监听 3000，热重载
 ```
 
-本地需安装 `pandoc`（macOS `brew install pandoc`，Linux `apt install pandoc`）。PDF 版式预览可选：本地开发将 `.env` 中 `PDF2HTML_URL` 留空，并安装本地 `pdf2htmlEX` 二进制（设 `PDF2HTML_BIN`），否则该 tab 会报工具不可用。OnlyOffice 可用容器：
+- TypeORM `synchronize=true`（开发模式自动建表，改 entity 即生效）
+- `pg_trgm` 扩展与 GIN 索引在 `onApplicationBootstrap` 自动创建
+- API 调试文档默认开启：http://localhost:3000/api/docs
+- 看到日志 `LXDOC 后端服务已启动` 即就绪
 
-```bash
-docker run -d --name onlyoffice -p 8081:80 \
-  -e JWT_ENABLED=true -e JWT_SECRET=lxdoc-onlyoffice-dev-secret \
-  onlyoffice/documentserver
-```
-
-### 前端
+### 步骤 4：启动前端
 
 ```bash
 cd web
 pnpm install
-pnpm dev          # 监听 5173
+pnpm dev          # 监听 5173，热重载
 ```
 
 `vite.config.ts` 已配置代理：
 
-- `/api` → `http://localhost:3000`
-- `/onlyoffice` → `http://localhost:8081`（可用 `VITE_ONLYOFFICE_PROXY` 覆盖）
+- `/api` → `http://localhost:3000`（后端）
+- `/onlyoffice` → `http://localhost:8081`（OnlyOffice，可用 `VITE_ONLYOFFICE_PROXY` 覆盖）
 
-### 数据库
+访问 http://localhost:5173，用 `admin@lxdoc.local` / `lxdoc12345` 登录。
 
-本地可用容器跑 PostgreSQL：
+### 完整功能测试清单
 
-```bash
-docker run -d --name lxdoc-pg -p 5432:5432 \
-  -e POSTGRES_USER=lxdoc -e POSTGRES_PASSWORD=lxdoc -e POSTGRES_DB=lxdoc \
-  postgres:16-alpine
+各功能依赖的服务与验证方式：
+
+| 功能 | 依赖服务 | 验证方式 |
+|------|---------|---------|
+| 登录 / 用户管理 | postgres | 登录成功，admin 页面可建用户 |
+| 上传 md/txt | postgres | 上传后内容可编辑、可搜索 |
+| 上传 docx/odt | postgres + pandoc | 上传后图片显示、pandoc 预览正常 |
+| docx/odt 编辑 | onlyoffice | 打开文档进入 OnlyOffice 编辑器，保存后版本+1 |
+| PDF 全文入库 | postgres | 上传 PDF 后内容可搜索 |
+| PDF 版式预览 | pdf2html | PDF 文档「版式预览」tab 显示保真 HTML |
+| PDF 翻页预览 | 后端（pdfjs） | PDF 文档「翻页预览」tab 正常翻页 |
+| PDF 转可编辑 | soffice + pandoc | 点「转可编辑」生成新 md 文档（需本机装 libreoffice） |
+| 文档解析（图片/表格） | docling | `DOCLING_ENABLED=true` 时上传 PDF，content 含 `![](/api/files/...)` 图片引用 |
+| AI 总结 | LLM 端点 | `LLM_ENABLED=true` 时点「AI 总结」生成新文档（无 LLM 端点返回 503 属正常） |
+| 全文检索 | postgres | 搜索框输入关键词返回结果，snippet 高亮 |
+| 组织权限 | postgres | 建部门/组，分配成员，验证读写隔离 |
+| 审计日志 | postgres | 登录/文档操作后，admin 审计页可查 |
+| API 调试 | 后端 | http://localhost:3000/api/docs 在线调接口 |
+
+### 常见问题
+
+**OnlyOffice 编辑器加载失败 / 白屏**
+- 确认 `docker compose -f docker-compose.dev.yml ps onlyoffice` 状态为 running
+- 浏览器 F12 看 `/onlyoffice/web-apps/...` 是否 200（vite 代理 8081）
+- 后端 `.env` 的 `BACKEND_PUBLIC_URL=http://host.docker.internal:3000`（OnlyOffice 容器回调本地后端）
+- 验证容器能否回调后端：`docker exec lxdoc-dev-onlyoffice curl -I http://host.docker.internal:3000/health`
+
+**PDF 版式预览报错**
+- 确认 pdf2html 健康：`docker compose -f docker-compose.dev.yml ps pdf2html`
+- 后端 `.env` 的 `PDF2HTML_URL=http://localhost:7000`
+- 验证后端可访问：浏览器访问 http://localhost:7000/health 返回 200
+
+**docling 解析未生效（上传 PDF 无图片）**
+- 确认 `DOCLING_ENABLED=true` 且 docling 容器健康（首次启动需下载模型，约 2GB）
+- `DOCLING_URL=http://localhost:5001`
+- 后端日志应有 `docling 提取图片 N 张`；若回退会 warn `docling 解析失败，回退到本地解析器`
+
+**前端 5173 访问后端 404**
+- 确认后端 `pnpm dev` 在 3000 运行
+- vite 代理 `/api` → 3000，无需额外配置
+
+**端口冲突**
+- 5432/8081/7000/5001/3000/5173 被占用时改 `docker-compose.dev.yml` 的端口映射或停掉占用进程
+
+### 仅测后端 API（不需要前端）
+
+后端 `pnpm dev` 启动后，直接用 Swagger UI 调试全部接口，无需启动前端：
+
+```
+http://localhost:3000/api/docs
 ```
 
-TypeORM `synchronize=true`（开发模式自动建表），生产应改用 migration。`pg_trgm` 扩展与 GIN 索引在 `AppModule.onApplicationBootstrap` 中自动创建。
+点击右上角 Authorize，填 `Bearer <accessToken>`（先调 `POST /api/auth/login`，用 `admin@lxdoc.local` / `lxdoc12345` 登录获取）。
+
+### 数据库直连
+
+本地映射了 5432，可用任意客户端连接：
+
+```
+host: localhost
+port: 5432
+user: lxdoc
+password: lxdoc
+database: lxdoc
+```
+
+重置开发数据：`docker compose -f docker-compose.dev.yml down -v`（删除 volume 后重启即全新库）。
 
 ## 生产部署建议
 
