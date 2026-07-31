@@ -229,6 +229,7 @@ TypeORM `synchronize=true`（开发模式自动建表），生产应改用 migra
 5. **资源**：OnlyOffice 较吃内存，建议 ≥ 4G；可限制并发编辑数
 6. **网络隔离**：`BACKEND_PUBLIC_URL` 与 `ONLYOFFICE_URL` 在容器间内网通信，不暴露公网
 7. **关闭 synchronize**：生产环境 `synchronize=false`，用 migration 管理 schema
+8. **资源规划**：硬件选型、磁盘预估与运维补充配置见 [部署资源规划](./resource-planning.md)
 
 ## 常见问题
 
