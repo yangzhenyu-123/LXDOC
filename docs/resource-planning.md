@@ -10,25 +10,29 @@
 | backend | lxdoc-backend | 2g | 2 | NestJS API + 文档解析 + LLM 调用 + LibreOffice/soffice 转换 | 经 nginx 反代 |
 | onlyoffice | documentserver:8.2 | 2g | 2 | docx/odt 原格式在线编辑 | 经 nginx 反代 |
 | pdf2html | lxdoc-pdf2html | 1g | 1 | PDF→版式 HTML sidecar | 否（仅内部） |
+| docling | docling-serve:cpu-latest | 4g | 2 | 统一文档解析（PDF 图片/表格/OCR）sidecar，可选 | 否（仅 internal） |
 | frontend | lxdoc-frontend | 512m | 1 | nginx 静态站 + 反代 | 8080 对外 |
 
-> 容器资源限制总和约 **6.5 GB**，加上宿主机系统开销，**8 GB 是实际起步线**。
+> 不含 docling 时容器资源限制总和约 **6.5 GB**；启用 docling（`DOCLING_ENABLED=true`）后增至 **10.5 GB**。docling 为可选 sidecar，不启用时上传回退本地 pandoc/pdf-parse。
+>
+> 起步线：不启用 docling **8 GB**；启用 docling **12 GB**。
 
 ## 推荐配置
 
 ### 最低可启动（小团队 / PoC）
 
-- 内存：约 **6.5 GB**（5 容器限制之和）+ 宿主机系统 ~1 GB
+- 内存：约 **6.5 GB**（不含 docling，5 容器限制之和）+ 宿主机系统 ~1 GB
 - CPU：**2 核**（所有容器共享，调度紧张）
 - 磁盘：**20 GB**（系统 + 镜像约 5 GB + 上传文档 + Postgres 数据 + OnlyOffice 缓存/字体）
 - 实际可用：勉强，OnlyOffice 与 soffice 并发转换时易 OOM/卡顿
+- docling：保持 `DOCLING_ENABLED=false`，上传走 pandoc/pdf-parse
 
 ### 推荐生产（中等团队，~50 人并发）
 
-- 内存：**8–12 GB**
+- 内存：**12–16 GB**（启用 docling 后）
 - CPU：**4 核**
-- 磁盘：**50–100 GB** SSD
-- 说明：OnlyOffice 编辑 + backend 的 soffice PDF→docx 转换是内存大户，2g 上限偏紧，建议监控后按需上调到 3g
+- 磁盘：**80–120 GB** SSD（docling 模型缓存约 2 GB）
+- 说明：OnlyOffice 编辑 + backend 的 soffice PDF→docx 转换是内存大户，2g 上限偏紧，建议监控后按需上调到 3g；启用 docling 后 PDF 能提取图片/表格，AI 总结质量显著提升
 
 ### 高负载（百人级并发 / 大量 PDF）
 

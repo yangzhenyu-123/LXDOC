@@ -17,7 +17,9 @@ import { Category } from '../categories/category.entity';
 import { TextParser } from './parsers/text.parser';
 import { PandocParser } from './parsers/pandoc.parser';
 import { PdfParser } from './parsers/pdf.parser';
+import { DoclingParser } from './parsers/docling.parser';
 import { getUploadDir, uploadConfig } from '../config/upload.config';
+import { doclingConfig } from '../config/docling.config';
 import { AccessControlService } from '../organizations/access-control.service';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 
@@ -64,6 +66,7 @@ export class UploadsService {
     private readonly textParser: TextParser,
     private readonly pandocParser: PandocParser,
     private readonly pdfParser: PdfParser,
+    private readonly doclingParser: DoclingParser,
     private readonly accessControl: AccessControlService,
   ) {}
 
@@ -198,17 +201,26 @@ export class UploadsService {
       wroteTmpInput = true;
 
       // 5. 按 format 调用对应 parser
+      //    md/txt 始终走 TextParser（纯文本无需重型解析）；
+      //    docx/odt/pdf 在 DOCLING_ENABLED 时优先走 DoclingParser（统一解析，
+      //    支持 PDF 图片/表格/版式/OCR），失败自动回退到 pandoc/pdf-parse
       let result: { content: string | null; title?: string; pages?: number };
+      let usedDocling = false;
       try {
         if (format === DocumentFormat.MD || format === DocumentFormat.TXT) {
           result = await this.textParser.parse(tmpInput, docId, format);
-        } else if (
-          format === DocumentFormat.DOCX ||
-          format === DocumentFormat.ODT
-        ) {
-          result = await this.pandocParser.parse(tmpInput, docId, format);
+        } else if (doclingConfig.enabled) {
+          try {
+            result = await this.doclingParser.parse(tmpInput, docId, format);
+            usedDocling = true;
+          } catch (e) {
+            this.logger.warn(
+              `docling 解析失败，回退到本地解析器：${(e as Error).message}`,
+            );
+            result = await this.fallbackParse(tmpInput, docId, format);
+          }
         } else {
-          result = await this.pdfParser.parse(tmpInput, docId, format);
+          result = await this.fallbackParse(tmpInput, docId, format);
         }
       } finally {
         // 清理临时输入文件
@@ -218,7 +230,9 @@ export class UploadsService {
       }
 
       // 6. 更新 content、（PDF 情况）title 与 pages 元信息
-      const patch: Partial<Pick<Document, 'content' | 'title' | 'pages'>> = {
+      const patch: Partial<
+        Pick<Document, 'content' | 'title' | 'pages' | 'contentSource'>
+      > = {
         content: result.content,
       };
       if (result.title) {
@@ -227,10 +241,15 @@ export class UploadsService {
       if (typeof result.pages === 'number') {
         patch.pages = result.pages;
       }
+      // docling 解析成功时覆盖 contentSource（initialContentSource 按格式预设，此处校正为 docling）
+      if (usedDocling) {
+        patch.contentSource = ContentSource.DOCLING;
+      }
       await this.documentRepo.update(docId, patch);
       saved.content = result.content;
       if (result.title) saved.title = result.title;
       if (typeof result.pages === 'number') saved.pages = result.pages;
+      if (usedDocling) saved.contentSource = ContentSource.DOCLING;
 
       // 7. 创建 version=1 的初始快照
       await this.versionRepo.save(
@@ -267,6 +286,21 @@ export class UploadsService {
         `文档解析失败：${(err as Error).message}`,
       );
     }
+  }
+
+  /**
+   * 本地回退解析器（docling 不可用时使用）
+   * docx/odt → pandoc，pdf → pdf-parse
+   */
+  private async fallbackParse(
+    filePath: string,
+    docId: string,
+    format: DocumentFormat,
+  ): Promise<{ content: string | null; title?: string; pages?: number }> {
+    if (format === DocumentFormat.DOCX || format === DocumentFormat.ODT) {
+      return this.pandocParser.parse(filePath, docId, format);
+    }
+    return this.pdfParser.parse(filePath, docId, format);
   }
 
   /**

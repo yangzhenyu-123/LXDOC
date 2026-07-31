@@ -76,6 +76,18 @@ git push origin v1.0.0
 
 完整接口清单见 [API 参考](./api-reference.md)。
 
+## 文档解析（docling-serve）
+
+LXDOC 上传文档采用「docling 为主 + 本地回退」双层解析，支持带图片文档的存储：
+
+- `DOCLING_ENABLED=true` 时，docx/odt/pdf 优先走 docling-serve sidecar，提取图片到 `images/<docId>/`，content 以 `/api/files/<docId>/image/<name>` 引用
+- docling 不可用时自动回退 pandoc/pdf-parse，上传不中断
+- PDF 经 docling 解析可提取图片/表格/版式（本地 pdf-parse 只能取纯文本）
+
+启用方式：`.env` 设置 `DOCLING_ENABLED=true`（默认关闭）。扫描件需额外设 `DOCLING_DO_OCR=true`（CPU 模式吃内存，sidecar 需 4g+）。
+
+存储设计与解析流程详见 [文档解析与图片存储设计](./parsing.md)，资源影响见 [部署资源规划](./resource-planning.md)。
+
 ## 服务编排说明
 
 `docker-compose.yml` 关键配置：

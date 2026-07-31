@@ -37,6 +37,7 @@ export enum DocumentOwnerType {
  * - pdf_text: pdf-parse 提取的全文
  * - onlyoffice: docx 由 OnlyOffice 回写标记
  * - ai_summary: AI（GLM5.2）基于原文档生成的总结文档，采用 Docsify 风格渲染
+ * - docling: 由 docling-serve 统一解析（支持 PDF 图片/表格/版式/OCR）
  */
 export enum ContentSource {
   MANUAL = 'manual',
@@ -44,6 +45,7 @@ export enum ContentSource {
   PDF_TEXT = 'pdf_text',
   ONLYOFFICE = 'onlyoffice',
   AI_SUMMARY = 'ai_summary',
+  DOCLING = 'docling',
 }
 
 /**

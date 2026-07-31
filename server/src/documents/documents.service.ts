@@ -264,7 +264,13 @@ export class DocumentsService {
     }
 
     // 读取已解析的文本内容
-    const rawText = (doc.content ?? '').trim();
+    // 图片链接替换为占位：LLM 无法识图，保留 /api/files/... URL 对模型是无意义噪声，
+    // 替换为 [图片: alt] 占位，既减少 token 又保留图片存在感知
+    const rawText = (doc.content ?? '')
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, (_m, alt: string) =>
+        `[图片${alt ? `: ${alt}` : ''}]`,
+      )
+      .trim();
     if (!rawText) {
       throw new BadRequestException(
         '文档无可用文本内容（可能尚未解析或为空文档），无法生成总结',

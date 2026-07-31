@@ -77,12 +77,22 @@ services:
       # API 调试文档（Swagger UI）：生产默认关闭，需调试时在 .env 设 ENABLE_API_DOCS=true
       # 开启后访问 http://localhost:8080/api/docs
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
+      # docling-serve 统一文档解析（主解析器，支持 PDF 图片/表格/OCR）
+      # 启用时上传 docx/odt/pdf 优先走 docling，失败回退 pandoc/pdf-parse
+      DOCLING_ENABLED: ${DOCLING_ENABLED:-false}
+      DOCLING_URL: ${DOCLING_URL:-http://docling:5001}
+      DOCLING_API_KEY: ${DOCLING_API_KEY:-}
+      DOCLING_DO_OCR: ${DOCLING_DO_OCR:-false}
+      DOCLING_TIMEOUT: ${DOCLING_TIMEOUT:-180000}
     depends_on:
       postgres:
         condition: service_healthy
       # pdf2html 为软依赖：sidecar 未就绪时仅 PDF 版式预览不可用，不阻断后端启动
       # 故不强制 service_healthy，避免 sidecar 故障导致整个后端起不来
       pdf2html:
+        condition: service_started
+      # docling 为软依赖：未就绪时上传回退本地 pandoc/pdf-parse，不阻断后端启动
+      docling:
         condition: service_started
     volumes:
       # 上传文件目录挂载到宿主机，便于持久化与查看
@@ -153,6 +163,32 @@ services:
     mem_limit: 1g
     cpus: 1
 
+  # docling-serve sidecar：统一文档解析（docx/odt/pdf → markdown + 图片/表格/OCR）
+  # 作为主解析器：后端 DOCLING_ENABLED=true 时上传走此服务，失败自动回退 pandoc/pdf-parse
+  # 仅 compose 内网，不对外暴露；CPU 镜像，OCR/大 PDF 解析吃内存，限制 4g/2cpu
+  # 首次启动需下载约 2GB 模型，start_period 给 120s；模型缓存在 volume 避免重复下载
+  docling:
+    image: quay.io/docling-project/docling-serve:cpu-latest
+    container_name: lxdoc-docling
+    environment:
+      # 内网部署可设 DOCLING_SERVE_API_KEY 增加鉴权，后端用 DOCLING_API_KEY 对应
+      DOCLING_SERVE_ENABLE_UI: "false"
+    volumes:
+      - docling-models:/root/.cache/docling
+    expose:
+      - "5001"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5001/health',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    mem_limit: 4g
+    cpus: 2
+    networks:
+      - internal
+
   # 前端 nginx 服务
   frontend:
     image: ${LXDOC_IMAGE_PREFIX:-ghcr.io/yangzhenyu-123}/lxdoc-frontend:${LXDOC_IMAGE_TAG:-latest}
@@ -190,3 +226,4 @@ volumes:
   postgres-data:
   onlyoffice-data:
   onlyoffice-cache:
+  docling-models:
