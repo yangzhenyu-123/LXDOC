@@ -7,6 +7,13 @@ import {
   Patch,
   Post,
 } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiOperation,
+  ApiParam,
+  ApiTags,
+} from '@nestjs/swagger';
 import { CategoriesService } from './categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
@@ -27,23 +34,30 @@ import { UserRole } from '../users/user.entity';
  * - PATCH  /api/categories/:id    更新分类（editor+，editor 仅可改自己创建的）
  * - DELETE /api/categories/:id    删除分类（editor+，editor 仅可删自己创建的）
  */
+@ApiTags('分类 Categories')
+@ApiBearerAuth('access-token')
 @Controller('categories')
 export class CategoriesController {
   constructor(private readonly service: CategoriesService) {}
 
   // 获取分类树（登录可读，无 @Roles）
+  @ApiOperation({ summary: '获取分类树' })
   @Get()
   findAll(@CurrentUser() user: AuthUser): Promise<CategoryResponseDto[]> {
     return this.service.findAll(user);
   }
 
   // 获取单个分类（登录可读，无 @Roles）
+  @ApiOperation({ summary: '获取单个分类' })
+  @ApiParam({ name: 'id', description: '分类 ID', type: String })
   @Get(':id')
   findOne(@Param('id') id: string): Promise<CategoryResponseDto> {
     return this.service.findOne(id);
   }
 
   // 创建分类（editor+）
+  @ApiOperation({ summary: '创建分类（editor+）' })
+  @ApiBody({ type: CreateCategoryDto })
   @Roles(UserRole.ADMIN, UserRole.EDITOR)
   @Audit(AuditAction.CATEGORY_CREATE, 'category')
   @Post()
@@ -55,6 +69,9 @@ export class CategoriesController {
   }
 
   // 更新分类（editor+；editor 仅可改自己 createdBy 的分类，由 service 校验）
+  @ApiOperation({ summary: '更新分类（editor 仅可改自己创建的）' })
+  @ApiParam({ name: 'id', description: '分类 ID', type: String })
+  @ApiBody({ type: UpdateCategoryDto })
   @Roles(UserRole.ADMIN, UserRole.EDITOR)
   @Patch(':id')
   update(
@@ -66,6 +83,8 @@ export class CategoriesController {
   }
 
   // 删除分类（editor+；editor 仅可删自己 createdBy 的分类，由 service 校验）
+  @ApiOperation({ summary: '删除分类（editor 仅可删自己创建的）' })
+  @ApiParam({ name: 'id', description: '分类 ID', type: String })
   @Roles(UserRole.ADMIN, UserRole.EDITOR)
   @Audit(AuditAction.CATEGORY_DELETE, 'category')
   @Delete(':id')

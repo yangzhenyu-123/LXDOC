@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import helmet from 'helmet';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
@@ -56,6 +57,58 @@ async function bootstrap() {
         .filter(Boolean),
       credentials: true,
     });
+  }
+
+  // API 调试文档（Swagger UI）：
+  // - 开发环境（NODE_ENV !== production）默认开启
+  // - 生产环境默认关闭，需显式 ENABLE_API_DOCS=true 才开启，避免接口结构泄露
+  const enableDocs =
+    process.env.ENABLE_API_DOCS === 'true' ||
+    (process.env.ENABLE_API_DOCS === undefined &&
+      process.env.NODE_ENV !== 'production');
+  if (enableDocs) {
+    // Swagger UI（/api/docs）依赖内联脚本/样式，对该路径覆盖 CSP 为宽松策略；
+    // 其余路径仍保持上方 helmet 的严格 CSP。setHeader 覆盖整个 CSP 头值。
+    app.use('/api/docs', (req, res, next) => {
+      res.setHeader(
+        'Content-Security-Policy',
+        [
+          "default-src 'self'",
+          "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+          "style-src 'self' 'unsafe-inline'",
+          "img-src 'self' data:",
+          "font-src 'self' data:",
+          "connect-src 'self'",
+        ].join('; '),
+      );
+      next();
+    });
+    const config = new DocumentBuilder()
+      .setTitle('LXDOC API')
+      .setDescription(
+        'LXDOC 企业知识库 API 调试文档。\n\n' +
+          '鉴权方式：除 @Public 接口外，均需在右上角 Authorize 填入 ' +
+          '`Bearer <accessToken>`（登录 /api/auth/login 获取）。',
+      )
+      .setVersion('0.1.0')
+      .addBearerAuth(
+        {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT',
+          name: 'Authorization',
+          in: 'header',
+        },
+        'access-token',
+      )
+      .build();
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('api/docs', app, document, {
+      swaggerOptions: { persistAuthorization: true },
+    });
+    logger.log('API 调试文档已启用：/api/docs');
+  } else {
+    logger.log('API 调试文档已关闭（生产环境需 ENABLE_API_DOCS=true 开启）');
   }
 
   const port = process.env.PORT ?? 3000;

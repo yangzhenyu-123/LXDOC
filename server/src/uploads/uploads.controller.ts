@@ -6,6 +6,13 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
 import * as path from 'node:path';
 import { UploadsService, ALLOWED_EXTENSIONS } from './uploads.service';
@@ -23,6 +30,8 @@ import { UserRole } from '../users/user.entity';
  * 全局前缀 /api，实际路径为 /api/uploads 与 /api/uploads/image
  * 上传需 editor+ 权限（admin / editor）
  */
+@ApiTags('上传 Uploads')
+@ApiBearerAuth('access-token')
 @Roles(UserRole.ADMIN, UserRole.EDITOR)
 @Controller('uploads')
 export class UploadsController {
@@ -35,6 +44,26 @@ export class UploadsController {
    * 校验扩展名白名单后调用 service.ingest，记录 createdBy
    * 返回 { id, title, format, version, categoryId }
    */
+  @ApiOperation({ summary: '上传文档（multipart file 字段 file）' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    description:
+      'categoryId 为分类 ID；file 为上传文件（字段名必须为 file，支持 .md/.txt/.docx/.odt/.pdf）',
+    schema: {
+      type: 'object',
+      properties: {
+        categoryId: { type: 'string', format: 'uuid', description: '分类 ID' },
+        ownerType: {
+          type: 'string',
+          enum: ['personal', 'group', 'department'],
+          description: '文档归属类型（可选，默认 personal）',
+        },
+        ownerId: { type: 'string', format: 'uuid', description: '组织节点 ID（ownerType 非 personal 时必填）' },
+        file: { type: 'string', format: 'binary', description: '上传文件' },
+      },
+      required: ['categoryId', 'file'],
+    },
+  })
   @Post()
   @Audit(AuditAction.DOCUMENT_CREATE, 'document')
   @UseInterceptors(
@@ -82,6 +111,20 @@ export class UploadsController {
    * 仅接受图片 MIME，保存到 images/<docId|user.id>/<uuid>.<ext>
    * 返回 { url, filename }
    */
+  @ApiOperation({ summary: '上传图片（multipart file 字段 file）' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    description:
+      'docId 为关联文档 ID（可空，空时按用户隔离临时图片）；file 为图片文件（字段名 file，仅 PNG/JPEG/GIF/WEBP）',
+    schema: {
+      type: 'object',
+      properties: {
+        docId: { type: 'string', format: 'uuid', description: '关联文档 ID（可选）', nullable: true },
+        file: { type: 'string', format: 'binary', description: '图片文件' },
+      },
+      required: ['file'],
+    },
+  })
   @Post('image')
   @UseInterceptors(
     FileInterceptor('file', {

@@ -5,6 +5,12 @@ import {
   Post,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginDto } from './dto/login.dto';
@@ -24,6 +30,8 @@ import { AuditAction } from '../audit/audit-log.entity';
  * - POST   /api/auth/logout          登出，使指定 refresh token 失效（公开）
  * - PATCH  /api/auth/change-password 修改密码（需登录，依赖全局 JwtAuthGuard）
  */
+@ApiTags('认证 Auth')
+@ApiBearerAuth('access-token')
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
@@ -31,6 +39,8 @@ export class AuthController {
   @Public()
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Audit(AuditAction.LOGIN)
+  @ApiOperation({ summary: '登录，返回双 token（公开，无需鉴权）' })
+  @ApiBody({ type: LoginDto })
   @Post('login')
   async login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
@@ -39,12 +49,16 @@ export class AuthController {
   @Public()
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
   @Audit(AuditAction.USER_CREATE)
+  @ApiOperation({ summary: '用户自注册（公开，无需鉴权）' })
+  @ApiBody({ type: RegisterDto })
   @Post('register')
   async register(@Body() dto: RegisterDto) {
     return this.authService.register(dto);
   }
 
   @Public()
+  @ApiOperation({ summary: '刷新 access token（公开，无需鉴权）' })
+  @ApiBody({ type: RefreshDto })
   @Post('refresh')
   async refresh(@Body() dto: RefreshDto) {
     return this.authService.refresh(dto.refreshToken);
@@ -52,6 +66,8 @@ export class AuthController {
 
   @Public()
   @Audit(AuditAction.LOGOUT)
+  @ApiOperation({ summary: '登出，使指定 refresh token 失效（公开，无需鉴权）' })
+  @ApiBody({ type: RefreshDto })
   @Post('logout')
   async logout(@Body() dto: RefreshDto) {
     return this.authService.logout(dto.refreshToken);
@@ -59,6 +75,8 @@ export class AuthController {
 
   // 不加 @Public()，依赖全局 JwtAuthGuard 校验登录态
   @Audit(AuditAction.USER_UPDATE, 'user')
+  @ApiOperation({ summary: '修改密码' })
+  @ApiBody({ type: ChangePasswordDto })
   @Patch('change-password')
   async changePassword(
     @CurrentUser('id') userId: string,

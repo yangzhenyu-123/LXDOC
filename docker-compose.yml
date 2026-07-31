@@ -74,6 +74,9 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-http://internal-glm/v1}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-glm-5.2}
+      # API 调试文档（Swagger UI）：生产默认关闭，需调试时在 .env 设 ENABLE_API_DOCS=true
+      # 开启后访问 http://localhost:8080/api/docs
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
     depends_on:
       postgres:
         condition: service_healthy

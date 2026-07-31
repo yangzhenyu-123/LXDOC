@@ -4,6 +4,20 @@
 
 权限标注：`🔑登录`（任意登录用户）、`👤admin`、`✏️editor+`（admin/editor）、`🌐公开`。
 
+## 交互式调试（Swagger UI）
+
+部署后可直接在浏览器打开交互式 API 调试文档，在线发送请求调试全部接口：
+
+- 调试入口：`http://<后端地址>/api/docs`（compose 部署经 nginx 反代为 `http://localhost:8080/api/docs`）
+- 鉴权：点击页面右上角 `Authorize`，填入 `Bearer <accessToken>`（先调 `POST /api/auth/login` 获取 accessToken）
+- 原始 OpenAPI JSON：`/api/docs-json`；YAML：`/api/docs-yaml`，可导入 Postman/Apifox
+
+> 启用开关 `ENABLE_API_DOCS`：开发环境（`NODE_ENV !== production`）默认开启；**生产环境默认关闭**，需显式设置 `ENABLE_API_DOCS=true` 才开启，避免接口结构对外泄露。配置方式见 [部署指南](./deployment.md)。
+
+下方为手工维护的接口速查表，与 Swagger 自动生成文档内容一致，可作快速浏览用。
+
+
+
 ## 认证 Auth
 
 | 方法 | 路径 | 权限 | 说明 |

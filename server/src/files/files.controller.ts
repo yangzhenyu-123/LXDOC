@@ -6,6 +6,13 @@ import {
   Res,
   UnauthorizedException,
 } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiParam,
+  ApiQuery,
+  ApiTags,
+} from '@nestjs/swagger';
 import { FilesService } from './files.service';
 import { AccessControlService } from '../organizations/access-control.service';
 import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
@@ -32,6 +39,8 @@ interface SendFileResponse {
  * 故用 ?token= 短期签名 token（绑定 docId，默认 10 分钟）。
  * token 由前端先调 /api/files/token/:docId（带 Bearer）取得。
  */
+@ApiTags('文件 Files')
+@ApiBearerAuth('access-token')
 @Controller('files')
 export class FilesController {
   constructor(
@@ -44,6 +53,8 @@ export class FilesController {
    * 需登录，且对目标文档有读权限，否则 403
    * 返回 { token }，前端拼到图片/原文件 URL 的 ?token= 上
    */
+  @ApiOperation({ summary: '签发短期文件 token（需读权限）' })
+  @ApiParam({ name: 'docId', description: '文档 ID', type: String })
   @Get('token/:docId')
   async signToken(
     @Param('docId') docId: string,
@@ -59,6 +70,9 @@ export class FilesController {
    * 下载原文件（pdf/docx/odt 等）
    * @Public：跳过全局 JwtAuthGuard，由 query token 校验
    */
+  @ApiOperation({ summary: '下载原文件（公开，无需鉴权，校验 token）' })
+  @ApiParam({ name: 'docId', description: '文档 ID', type: String })
+  @ApiQuery({ name: 'token', required: true, description: '短期文件 token（先调 /api/files/token/:docId 取得）', type: String })
   @Public()
   @Get(':docId/original')
   async getOriginal(
@@ -78,6 +92,10 @@ export class FilesController {
    * 下载图片（docx 预览抽取的图片 / 编辑器上传的图片）
    * @Public：跳过全局 JwtAuthGuard，由 query token 校验
    */
+  @ApiOperation({ summary: '下载图片（公开，无需鉴权，校验 token）' })
+  @ApiParam({ name: 'docId', description: '文档 ID', type: String })
+  @ApiParam({ name: 'name', description: '图片文件名', type: String })
+  @ApiQuery({ name: 'token', required: true, description: '短期文件 token（先调 /api/files/token/:docId 取得）', type: String })
   @Public()
   @Get(':docId/image/:name')
   async getImage(

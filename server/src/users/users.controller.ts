@@ -8,6 +8,14 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiOperation,
+  ApiParam,
+  ApiQuery,
+  ApiTags,
+} from '@nestjs/swagger';
 import { UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -29,11 +37,16 @@ import { UserRole } from './user.entity';
  * - PATCH  /api/users/:id              更新用户（防误锁：不能降级/禁用自己）
  * - DELETE /api/users/:id              删除用户（不能删自己、不能删最后一个 admin）
  */
+@ApiTags('用户 Users')
+@ApiBearerAuth('access-token')
 @Roles(UserRole.ADMIN)
 @Controller('users')
 export class UsersController {
   constructor(private readonly service: UsersService) {}
 
+  @ApiOperation({ summary: '分页查询用户列表' })
+  @ApiQuery({ name: 'page', required: false, description: '页码，默认 1', type: Number })
+  @ApiQuery({ name: 'pageSize', required: false, description: '每页条数，默认 20', type: Number })
   @Get()
   findAll(
     @Query('page') page?: string,
@@ -47,12 +60,17 @@ export class UsersController {
     );
   }
 
+  @ApiOperation({ summary: '创建用户' })
+  @ApiBody({ type: CreateUserDto })
   @Post()
   @Audit(AuditAction.USER_CREATE, 'user')
   create(@Body() dto: CreateUserDto) {
     return this.service.create(dto);
   }
 
+  @ApiOperation({ summary: '更新用户（不能降级/禁用自己）' })
+  @ApiParam({ name: 'id', description: '用户 ID', type: String })
+  @ApiBody({ type: UpdateUserDto })
   @Patch(':id')
   @Audit(AuditAction.USER_UPDATE, 'user')
   update(
@@ -63,6 +81,8 @@ export class UsersController {
     return this.service.update(id, dto, user);
   }
 
+  @ApiOperation({ summary: '删除用户（不能删自己、不能删最后一个 admin）' })
+  @ApiParam({ name: 'id', description: '用户 ID', type: String })
   @Delete(':id')
   @Audit(AuditAction.USER_DELETE, 'user')
   async remove(

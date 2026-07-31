@@ -61,6 +61,21 @@ git push origin v1.0.0
 
 > 仅构建 `linux/amd64`：pdf2html 的 AppImage 仅为 amd64，arm64 需自行从源码构建（见 [PDF 版式预览](#pdf-版式预览pdf2htmlex-sidecar)）。
 
+## API 调试文档（Swagger UI）
+
+后端内置交互式 API 调试文档，部署后可直接在浏览器调试全部接口：
+
+- 调试入口：`http://localhost:8080/api/docs`（compose 部署经 nginx 反代）
+- 鉴权：点击右上角 `Authorize`，填入 `Bearer <accessToken>`（先调 `POST /api/auth/login` 获取）
+- 上传接口（`POST /api/uploads`、`POST /api/uploads/image`）支持文件选择框直接上传调试
+- OpenAPI JSON `/api/docs-json`、YAML `/api/docs-yaml` 可导入 Postman / Apifox
+
+**启用开关** `ENABLE_API_DOCS`：
+- 开发环境（`NODE_ENV !== production`）默认开启
+- 生产环境（compose 部署 `NODE_ENV=production`）**默认关闭**，避免接口结构对外泄露；需调试时在 `.env` 设置 `ENABLE_API_DOCS=true` 后 `docker compose up -d` 重启
+
+完整接口清单见 [API 参考](./api-reference.md)。
+
 ## 服务编排说明
 
 `docker-compose.yml` 关键配置：
