@@ -86,7 +86,7 @@ export class UsersService {
       email,
     });
     if (withPassword) {
-      qb.addSelect('user.password_hash');
+      qb.addSelect('user.passwordHash');
     }
     return qb.getOne();
   }
@@ -101,7 +101,7 @@ export class UsersService {
       .createQueryBuilder('user')
       .where('user.id = :id', { id });
     if (withPassword) {
-      qb.addSelect('user.password_hash');
+      qb.addSelect('user.passwordHash');
     }
     return qb.getOne();
   }

@@ -67,6 +67,7 @@ export class OrganizationsService {
       type: OrganizationType.DEPARTMENT,
       parentId: null,
       sort: 0,
+      path: '',
     });
     const savedDept1 = await this.orgRepo.save(dept1);
     savedDept1.path = savedDept1.id;
@@ -77,6 +78,7 @@ export class OrganizationsService {
       type: OrganizationType.GROUP,
       parentId: savedDept1.id,
       sort: 0,
+      path: '',
     });
     const savedGroup1 = await this.orgRepo.save(group1);
     savedGroup1.path = `${savedDept1.path}.${savedGroup1.id}`;
@@ -87,6 +89,7 @@ export class OrganizationsService {
       type: OrganizationType.DEPARTMENT,
       parentId: null,
       sort: 1,
+      path: '',
     });
     const savedDept2 = await this.orgRepo.save(dept2);
     savedDept2.path = savedDept2.id;
@@ -97,6 +100,7 @@ export class OrganizationsService {
       type: OrganizationType.GROUP,
       parentId: savedDept2.id,
       sort: 0,
+      path: '',
     });
     const savedGroup2 = await this.orgRepo.save(group2);
     savedGroup2.path = `${savedDept2.path}.${savedGroup2.id}`;
