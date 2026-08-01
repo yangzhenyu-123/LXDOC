@@ -104,10 +104,11 @@ tar czf uploads-$(date +%F).tar.gz uploads/
 
 | 服务 | 端口 | 说明 |
 |---|---|---|
-| `frontend` | 8080 | nginx 托管前端 + 反代 `/api`、`/onlyoffice` |
+| `frontend` | 8080 | nginx 托管前端 + 反代 `/api`、`/onlyoffice`、`/kkview` |
 | `backend` | 3000 | NestJS API（不对外，经 nginx 反代） |
-| `onlyoffice` | 8081 | OnlyOffice Document Server（不对外，经 nginx 反代） |
-| `pdf2html` | 7000 | pdf2htmlEX sidecar（仅内网） |
+| `onlyoffice` | 8081 | OnlyOffice Document Server 9.4（不对外，经 nginx 反代） |
+| `kkfileview` | 8012 | kkFileView 统一预览（不对外，经 nginx 反代） |
+| `pdf2html` | 7000 | pdf2htmlEX sidecar（仅内网，kkFileView 不可用时的回退） |
 | `postgres` | 5432 | PostgreSQL 16（仅内网） |
 
 > 仅 `8080` 对外暴露，其余服务均在内部网络，最小攻击面。
@@ -127,13 +128,15 @@ tar czf uploads-$(date +%F).tar.gz uploads/
    docker pull ghcr.io/yangzhenyu-123/lxdoc-backend:latest
    docker pull ghcr.io/yangzhenyu-123/lxdoc-frontend:latest
    docker pull ghcr.io/yangzhenyu-123/lxdoc-pdf2html:latest
-   docker pull onlyoffice/documentserver:8.2
+   docker pull onlyoffice/documentserver:9.4
+   docker pull keking/kkfileview:4.4.0
    docker pull postgres:16-alpine
    docker save -o lxdoc-images.tar \
      ghcr.io/yangzhenyu-123/lxdoc-backend:latest \
      ghcr.io/yangzhenyu-123/lxdoc-frontend:latest \
      ghcr.io/yangzhenyu-123/lxdoc-pdf2html:latest \
-     onlyoffice/documentserver:8.2 \
+     onlyoffice/documentserver:9.4 \
+     keking/kkfileview:4.4.0 \
      postgres:16-alpine
    ```
 2. 将 `lxdoc-images.tar`、`docker-compose.quickstart.yml` 拷贝到内网服务器
@@ -159,10 +162,11 @@ docker compose up -d
 
 | 服务 | 端口 | 说明 |
 |---|---|---|
-| `frontend` | 8080 | nginx 托管前端 + 反代 `/api`、`/onlyoffice` |
+| `frontend` | 8080 | nginx 托管前端 + 反代 `/api`、`/onlyoffice`、`/kkview` |
 | `backend` | 3000 | NestJS API |
-| `onlyoffice` | 8081 | OnlyOffice Document Server |
-| `pdf2html` | 7000 | pdf2htmlEX sidecar（PDF 版式预览，仅内网） |
+| `onlyoffice` | 8081 | OnlyOffice Document Server 9.4 |
+| `kkfileview` | 8012 | kkFileView 统一预览（100+ 格式，仅内网） |
+| `pdf2html` | 7000 | pdf2htmlEX sidecar（PDF 版式预览回退，仅内网） |
 | `docling` | 5001 | docling-serve sidecar（统一文档解析，仅内网，可选） |
 | `postgres` | 5432 | PostgreSQL 16 |
 
@@ -243,10 +247,17 @@ LXDOC 上传文档采用「docling 为主 + 本地回退」双层解析，支持
 
 ### onlyoffice
 
-- 镜像 `onlyoffice/documentserver:8.2`（固定版本标签，AGPL 许可，仅自用/内部部署合规）
+- 镜像 `onlyoffice/documentserver:9.4`（9.4 起移除 RabbitMQ/Postgres 依赖，单进程架构，社区版无 20 连接限制；AGPL 许可，仅自用/内部部署合规）
 - `JWT_ENABLED=true` + `JWT_SECRET` 与后端 `ONLYOFFICE_JWT_SECRET` 共享
 - 持久化卷：`onlyoffice-data`（文档转换缓存与字体）、`onlyoffice-cache`
 - 端口 8081:80，前端经 nginx 反代为同源 `/onlyoffice`
+
+### kkfileview
+
+- 镜像 `keking/kkfileview:4.4.0`（开源预览中间件，内置 LibreOffice，支持 100+ 格式）
+- 作为 docx/odt/pdf 等保真预览的统一入口，替代 pandoc/pdf2htmlEX 预览降级链路
+- 端口 8012，前端经 nginx 反代为同源 `/kkview`
+- 软依赖：未就绪时预览接口返回 503，前端自动回退 pdf2htmlEX
 
 ### frontend（nginx）
 
@@ -255,6 +266,7 @@ LXDOC 上传文档采用「docling 为主 + 本地回退」双层解析，支持
 - `/` → 前端静态资源（SPA 回退 index.html）
 - `/api/` → `backend:3000`
 - `/onlyoffice/` → `onlyoffice:80`（WebSocket + 长超时 + 100m body）
+- `/kkview/` → `kkfileview:8012`（预览 iframe，长超时 + 100m body）
 
 > 注意：nginx **不**直接暴露 `/uploads/` 目录。所有原始文件 / 图片访问统一走鉴权接口 `/api/files/...`（基于 JWT 签名 token），直接映射磁盘会导致越权下载。
 
@@ -291,7 +303,17 @@ LXDOC 上传文档采用「docling 为主 + 本地回退」双层解析，支持
 | `BACKEND_PUBLIC_URL` | http://backend:3000 | OnlyOffice 回调后端的地址（需 OnlyOffice 容器可达后端） |
 | `ONLYOFFICE_JWT_SECRET` | lxdoc-onlyoffice-dev-secret | 与 OnlyOffice 容器 `JWT_SECRET` 共享，签发 config 与校验回调 |
 
-> 三个地址语义：`ONLYOFFICE_URL` 是后端→OnlyOffice，`BACKEND_PUBLIC_URL` 是 OnlyOffice→后端，`ONLYOFFICE_PUBLIC_URL` 是浏览器→OnlyOffice。生产部署若网络隔离需分别配置。
+> 三个地址语义：`ONLYOFFICE_URL` 是后端→OnlyOffice，`BACKEND_PUBLIC_URL` 是 OnlyOffice→后端（kkFileView 拉取文件也复用此地址），`ONLYOFFICE_PUBLIC_URL` 是浏览器→OnlyOffice。生产部署若网络隔离需分别配置。
+
+### kkFileView 预览
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `KKFILEVIEW_ENABLED` | true | 是否启用 kkFileView 统一预览（false 时前端回退 pandoc/pdf2htmlEX） |
+| `KKFILEVIEW_URL` | http://kkfileview:8012 | kkFileView 容器内部地址（后端拼接预览 URL 用） |
+| `KKFILEVIEW_PUBLIC_URL` | /kkview | 浏览器可访问地址（前端 iframe 加载来源，通常同源反代） |
+
+> 预览流程：后端 `GET /api/documents/:id/kkview` 返回拼接好的 kkFileView 预览 URL（文件下载走鉴权签名接口 `/api/files/:docId/original?token=`，kkFileView 容器通过 `BACKEND_PUBLIC_URL` 拉取）。前端用 iframe 嵌入该 URL。kkFileView 未启用（返回 503）时前端自动回退 pdf2htmlEX。
 
 ### PDF 工具
 
@@ -373,7 +395,8 @@ docker compose -f docker-compose.dev.yml up -d
 |------|-----------|------|
 | postgres | 5432 | 数据库（用户/密码/db 均为 `lxdoc`） |
 | onlyoffice | 8081 | docx/odt 编辑 |
-| pdf2html | 7000 | PDF 版式预览 |
+| kkfileview | 8012 | 统一预览（docx/odt/pdf 保真预览） |
+| pdf2html | 7000 | PDF 版式预览（kkFileView 不可用时回退） |
 | docling | 5001 | 文档解析（可选，不测可 `stop docling`） |
 
 > docling 首次启动下载模型约 2GB，耗时较长；不测文档解析可先 `docker compose -f docker-compose.dev.yml stop docling`。
@@ -400,7 +423,12 @@ BACKEND_PUBLIC_URL=http://host.docker.internal:3000
 # OnlyOffice 容器地址（本地直连映射端口）
 ONLYOFFICE_URL=http://localhost:8081
 
-# PDF 版式预览：指向本地映射的 pdf2html
+# kkFileView 统一预览：本地直连映射端口（浏览器与后端均用 localhost:8012）
+KKFILEVIEW_ENABLED=true
+KKFILEVIEW_URL=http://localhost:8012
+KKFILEVIEW_PUBLIC_URL=http://localhost:8012
+
+# PDF 版式预览：指向本地映射的 pdf2html（kkFileView 不可用时回退）
 PDF2HTML_URL=http://localhost:7000
 
 # 文档解析：启用 docling（不测可保持 false）
@@ -452,8 +480,9 @@ pnpm dev          # 监听 5173，热重载
 | 上传 md/txt | postgres | 上传后内容可编辑、可搜索 |
 | 上传 docx/odt | postgres + pandoc | 上传后图片显示、pandoc 预览正常 |
 | docx/odt 编辑 | onlyoffice | 打开文档进入 OnlyOffice 编辑器，保存后版本+1 |
+| docx/odt/pdf 统一预览 | kkfileview | 文档「版式预览」tab 显示 kkFileView iframe 保真预览 |
 | PDF 全文入库 | postgres | 上传 PDF 后内容可搜索 |
-| PDF 版式预览 | pdf2html | PDF 文档「版式预览」tab 显示保真 HTML |
+| PDF 版式预览 | kkfileview（回退 pdf2html） | PDF 文档「版式预览」tab 显示保真预览（kkFileView 不可用时回退 pdf2htmlEX） |
 | PDF 翻页预览 | 后端（pdfjs） | PDF 文档「翻页预览」tab 正常翻页 |
 | PDF 转可编辑 | soffice + pandoc | 点「转可编辑」生成新 md 文档（需本机装 libreoffice） |
 | 文档解析（图片/表格） | docling | `DOCLING_ENABLED=true` 时上传 PDF，content 含 `![](/api/files/...)` 图片引用 |
@@ -471,6 +500,13 @@ pnpm dev          # 监听 5173，热重载
 - 后端 `.env` 的 `BACKEND_PUBLIC_URL=http://host.docker.internal:3000`（OnlyOffice 容器回调本地后端）
 - 验证容器能否回调后端：`docker exec lxdoc-dev-onlyoffice curl -I http://host.docker.internal:3000/health`
 
+**kkFileView 预览白屏 / 加载失败**
+- 确认 kkfileview 健康：`docker compose -f docker-compose.dev.yml ps kkfileview`
+- 浏览器 F12 看 `/kkview/onlinePreview` 请求是否 200
+- kkFileView 容器需能拉取文件：`BACKEND_PUBLIC_URL` 必须容器可达（本地开发为 `http://host.docker.internal:3000`）
+- 验证容器能否拉取文件：`docker exec lxdoc-dev-kkfileview curl -I http://host.docker.internal:3000/health`
+- kkFileView 不可用时前端自动回退 pdf2htmlEX，不影响翻页预览/编辑
+
 **PDF 版式预览报错**
 - 确认 pdf2html 健康：`docker compose -f docker-compose.dev.yml ps pdf2html`
 - 后端 `.env` 的 `PDF2HTML_URL=http://localhost:7000`
@@ -486,7 +522,7 @@ pnpm dev          # 监听 5173，热重载
 - vite 代理 `/api` → 3000，无需额外配置
 
 **端口冲突**
-- 5432/8081/7000/5001/3000/5173 被占用时改 `docker-compose.dev.yml` 的端口映射或停掉占用进程
+- 5432/8081/8012/7000/5001/3000/5173 被占用时改 `docker-compose.dev.yml` 的端口映射或停掉占用进程
 
 ### 仅测后端 API（不需要前端）
 
@@ -532,9 +568,19 @@ database: lxdoc
 - 检查 `ONLYOFFICE_JWT_SECRET` 与 onlyoffice 容器 `JWT_SECRET` 是否一致
 - 查 OnlyOffice 日志：`docker logs -f lxdoc-onlyoffice`
 
+### kkFileView 预览白屏 / 加载失败
+
+docker-compose 部署下统一预览由 `kkfileview` 服务提供，开箱即用。若报错排查：
+
+- 服务是否健康：`docker compose ps kkfileview`、`docker logs lxdoc-kkfileview`
+- 后端 `KKFILEVIEW_ENABLED=true` 且 `KKFILEVIEW_URL` 正确指向 `http://kkfileview:8012`
+- kkFileView 容器能否拉取文件：`docker exec lxdoc-kkfileview curl -I http://backend:3000/health`（依赖 `BACKEND_PUBLIC_URL`）
+- 浏览器 F12 看 `/kkview/onlinePreview` 请求是否 200
+- kkFileView 不可用时前端自动回退 pdf2htmlEX，不影响翻页预览/编辑
+
 ### PDF 版式预览报错
 
-docker-compose 部署下版式预览由 `pdf2html` sidecar 提供，开箱即用。若报错排查：
+docker-compose 部署下版式预览由 `pdf2html` sidecar 提供（kkFileView 不可用时的回退）。若报错排查：
 
 - sidecar 是否健康：`docker compose ps pdf2html`、`docker logs lxdoc-pdf2html`
 - 后端能否访问 sidecar：`docker exec lxdoc-backend node -e "fetch('http://pdf2html:7000/health').then(r=>console.log(r.status))"`

@@ -57,6 +57,10 @@ services:
       ONLYOFFICE_PUBLIC_URL: /onlyoffice
       BACKEND_PUBLIC_URL: http://backend:3000
       ONLYOFFICE_JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:?必须在 .env 中设置 OnlyOffice JWT secret}
+      # kkFileView 统一预览（容器内访问服务名，浏览器经 nginx 反代 /kkview）
+      KKFILEVIEW_ENABLED: ${KKFILEVIEW_ENABLED:-true}
+      KKFILEVIEW_URL: http://kkfileview:8012
+      KKFILEVIEW_PUBLIC_URL: /kkview
       PDF2HTML_URL: http://pdf2html:7000
       SOFFICE_BIN: soffice
       # LLM 默认关闭；需要 AI 总结时在 .env 开启并配置内网 GLM 端点
@@ -92,7 +96,7 @@ services:
       - internal
 
   onlyoffice:
-    image: onlyoffice/documentserver:8.2
+    image: onlyoffice/documentserver:9.4
     container_name: lxdoc-onlyoffice
     environment:
       JWT_ENABLED: "true"
@@ -103,6 +107,16 @@ services:
       - onlyoffice-cache:/var/lib/onlyoffice
     expose:
       - "80"
+    restart: unless-stopped
+    mem_limit: 2g
+    cpus: 2
+
+  # kkFileView 统一预览服务（100+ 格式开箱即用，经 nginx 反代 /kkview）
+  kkfileview:
+    image: keking/kkfileview:4.4.0
+    container_name: lxdoc-kkfileview
+    expose:
+      - "8012"
     restart: unless-stopped
     mem_limit: 2g
     cpus: 2

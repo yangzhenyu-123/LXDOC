@@ -25,6 +25,8 @@ import { AuthUser } from '../common/decorators/current-user.decorator';
 import { OptionalLlm } from '../llm/optional-llm.decorator';
 import { LlmService } from '../llm/llm.service';
 import { llmConfig } from '../config/llm.config';
+import { kkfileviewConfig } from '../config/kkfileview.config';
+import { onlyofficeConfig } from '../config/onlyoffice.config';
 
 /**
  * 文档版本列表响应（不含 content，避免大响应）
@@ -172,6 +174,38 @@ export class DocumentsService {
         `PDF 版式预览生成失败：${(err as Error).message}`,
       );
     }
+  }
+
+  /**
+   * 构建 kkFileView 统一预览 URL
+   * kkFileView 通过 ?url=<base64编码的文件下载URL> 拉取原文件并渲染
+   * 文件下载走鉴权签名接口 /api/files/:docId/original?token=（kkFileView 容器需能访问后端）
+   * 返回前端可直接 iframe 嵌入的浏览器可访问 URL（publicUrl）
+   *
+   * 适用：docx/odt/pdf 及其它 kkFileView 支持的格式，作为保真预览的统一入口
+   * kkFileView 未启用时抛 503，前端回退 pandoc/pdf2htmlEX
+   */
+  async getKkViewUrl(id: string, user: AuthUser): Promise<string> {
+    if (!kkfileviewConfig.enabled) {
+      throw new ServiceUnavailableException(
+        'kkFileView 预览未启用，请联系管理员配置 KKFILEVIEW_ENABLED=true',
+      );
+    }
+    const doc = await this.findOne(id, user);
+    if (!doc.originalPath) {
+      throw new NotFoundException(`文档 ${id} 缺少原始文件`);
+    }
+    const absPath = path.join(getUploadDir(), doc.originalPath);
+    if (!existsSync(absPath)) {
+      throw new NotFoundException(`原始文件不存在：${doc.originalPath}`);
+    }
+    // 签发短期文件 token（读权限已在 findOne 中校验）
+    const fileToken = this.filesService.signFileToken(id, user.id);
+    // kkFileView 容器通过 backendPublicUrl 拉取文件（与 OnlyOffice 回调同一地址）
+    const fileDownloadUrl = `${onlyofficeConfig.backendPublicUrl}/api/files/${id}/original?token=${encodeURIComponent(fileToken)}`;
+    // kkFileView 约定 ?url= 参数为 base64 编码的文件 URL
+    const encoded = Buffer.from(fileDownloadUrl).toString('base64');
+    return `${kkfileviewConfig.publicUrl}/onlinePreview?url=${encodeURIComponent(encoded)}`;
   }
 
   /**

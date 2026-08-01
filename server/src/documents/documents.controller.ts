@@ -88,6 +88,18 @@ export class DocumentsController {
     return { html };
   }
 
+  // 获取 kkFileView 统一预览 URL（前端 iframe 嵌入）
+  @ApiOperation({ summary: '获取 kkFileView 统一预览 URL' })
+  @ApiParam({ name: 'id', description: '文档 ID', type: String })
+  @Get('documents/:id/kkview')
+  async getKkViewUrl(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
+  ): Promise<{ url: string }> {
+    const url = await this.service.getKkViewUrl(id, user);
+    return { url };
+  }
+
   // 将 PDF 转为可编辑的新 markdown 文档（需写权限）
   @ApiOperation({ summary: '将 PDF 转为可编辑的新 markdown 文档（editor+）' })
   @ApiParam({ name: 'id', description: '文档 ID', type: String })

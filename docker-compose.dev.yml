@@ -33,7 +33,7 @@ services:
     restart: unless-stopped
 
   onlyoffice:
-    image: onlyoffice/documentserver:8.2
+    image: onlyoffice/documentserver:9.4
     container_name: lxdoc-dev-onlyoffice
     environment:
       JWT_ENABLED: "true"
@@ -46,6 +46,15 @@ services:
     # OnlyOffice 需回调本地后端（宿主机 3000），通过 host.docker.internal 访问
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    mem_limit: 2g
+
+  # kkFileView 统一预览（本地开发端口映射到宿主机，后端/浏览器均直连）
+  kkfileview:
+    image: keking/kkfileview:4.4.0
+    container_name: lxdoc-dev-kkfileview
+    ports:
+      - "8012:8012"
     restart: unless-stopped
     mem_limit: 2g
 

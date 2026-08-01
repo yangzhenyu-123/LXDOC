@@ -9,6 +9,7 @@ import {
   getDocument,
   getPreviewHtml,
   getPdfHtml,
+  getKkViewUrl,
   convertToEditable,
   summarizeDocument,
   listVersions,
@@ -89,11 +90,12 @@ const pdfUrl = computed(() =>
     : '',
 );
 
-// PDF 三 tab：版式预览（pdf2htmlEX） / 翻页预览（pdfjs） / 编辑文本（Vditor）
+// PDF 三 tab：版式预览（kkFileView iframe） / 翻页预览（pdfjs） / 编辑文本（Vditor）
 const pdfTab = ref<'layout' | 'pages' | 'text'>('layout');
-const pdfLayoutHtml = ref('');
-const pdfLayoutLoading = ref(false);
-const pdfLayoutError = ref<string | null>(null);
+// kkFileView 预览 URL（iframe src）；为空且无错误时表示未加载/未启用
+const kkviewUrl = ref('');
+const kkviewLoading = ref(false);
+const kkviewError = ref<string | null>(null);
 
 // 转为可编辑文档（需写权限，editor/admin）
 const convertLoading = ref(false);
@@ -166,8 +168,8 @@ async function loadDocument() {
     previewError.value = null;
     // 重置 PDF tab 状态
     pdfTab.value = 'layout';
-    pdfLayoutHtml.value = '';
-    pdfLayoutError.value = null;
+    kkviewUrl.value = '';
+    kkviewError.value = null;
     // 获取文件访问 token（PDF 原文件 / 编辑器图片加载需要）
     fileToken.value = await getFileToken(docId.value);
     await loadVersions();
@@ -252,18 +254,41 @@ async function save() {
 }
 
 /**
- * 加载 PDF 版式保真 HTML（pdf2htmlEX 生成）
+ * 加载 kkFileView 统一预览 URL（iframe 嵌入）
+ * kkFileView 未启用时后端返回 503，前端回退 pdf2htmlEX 版式预览
  */
-async function loadPdfLayoutHtml() {
+async function loadKkViewUrl() {
   if (!docId.value) return;
+  kkviewLoading.value = true;
+  kkviewError.value = null;
+  try {
+    kkviewUrl.value = await getKkViewUrl(docId.value);
+  } catch (err: any) {
+    // 503 表示 kkFileView 未启用，回退 pdf2htmlEX 版式预览
+    if (err?.response?.status === 503) {
+      kkviewUrl.value = '';
+      await loadPdfHtmlFallback();
+      return;
+    }
+    const msg =
+      err?.response?.data?.message ?? err?.message ?? '预览加载失败';
+    kkviewError.value = msg;
+    kkviewUrl.value = '';
+  } finally {
+    kkviewLoading.value = false;
+  }
+}
+
+/**
+ * pdf2htmlEX 版式预览回退（kkFileView 未启用时）
+ */
+const pdfLayoutHtml = ref('');
+const pdfLayoutLoading = ref(false);
+async function loadPdfHtmlFallback() {
   pdfLayoutLoading.value = true;
-  pdfLayoutError.value = null;
   try {
     pdfLayoutHtml.value = await getPdfHtml(docId.value);
-  } catch (err: any) {
-    const msg =
-      err?.response?.data?.message ?? err?.message ?? '版式预览加载失败';
-    pdfLayoutError.value = msg;
+  } catch (e: any) {
     pdfLayoutHtml.value = '';
   } finally {
     pdfLayoutLoading.value = false;
@@ -371,10 +396,15 @@ watch(docMode, (mode) => {
   }
 });
 
-// PDF tab 切换：首次进入"版式预览"时懒加载 pdf2htmlEX HTML
+// PDF tab 切换：首次进入"版式预览"时懒加载 kkFileView URL
 watch(pdfTab, (tab) => {
-  if (tab === 'layout' && !pdfLayoutHtml.value && !pdfLayoutError.value) {
-    loadPdfLayoutHtml();
+  if (
+    tab === 'layout' &&
+    !kkviewUrl.value &&
+    !kkviewError.value &&
+    !pdfLayoutHtml.value
+  ) {
+    loadKkViewUrl();
   }
 });
 
@@ -525,21 +555,28 @@ onMounted(() => {
               <el-radio-button value="pages">翻页预览</el-radio-button>
               <el-radio-button value="text">编辑文本</el-radio-button>
             </el-radio-group>
-            <!-- 版式预览：pdf2htmlEX 生成的保真 HTML -->
+            <!-- 版式预览：优先 kkFileView iframe；未启用时回退 pdf2htmlEX HTML -->
             <div
               v-if="pdfTab === 'layout'"
               class="preview-wrap"
-              v-loading="pdfLayoutLoading"
+              v-loading="kkviewLoading || pdfLayoutLoading"
             >
               <el-alert
-                v-if="pdfLayoutError"
-                :title="pdfLayoutError"
+                v-if="kkviewError"
+                :title="kkviewError"
                 type="error"
                 show-icon
                 :closable="false"
               />
+              <iframe
+                v-else-if="kkviewUrl"
+                :src="kkviewUrl"
+                class="kkview-iframe"
+                frameborder="0"
+                allowfullscreen
+              />
               <div
-                v-else
+                v-else-if="pdfLayoutHtml"
                 class="preview-html pdf-layout-html"
                 v-html="sanitizeHtml(pdfLayoutHtml)"
               />
@@ -767,6 +804,13 @@ onMounted(() => {
 }
 .preview-html :deep(code) {
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+/* kkFileView iframe 撑满预览区域 */
+.kkview-iframe {
+  width: 100%;
+  height: 100%;
+  min-height: 70vh;
+  border: none;
 }
 .sidebar {
   display: flex;

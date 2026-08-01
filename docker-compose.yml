@@ -65,6 +65,10 @@ services:
       ONLYOFFICE_PUBLIC_URL: /onlyoffice
       BACKEND_PUBLIC_URL: http://backend:3000
       ONLYOFFICE_JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:?必须在 .env 中设置 OnlyOffice JWT secret}
+      # kkFileView 统一预览（容器内访问服务名，浏览器经 nginx 反代 /kkview）
+      KKFILEVIEW_ENABLED: ${KKFILEVIEW_ENABLED:-true}
+      KKFILEVIEW_URL: http://kkfileview:8012
+      KKFILEVIEW_PUBLIC_URL: /kkview
       # PDF 版式预览：调用 pdf2html sidecar（HTTP）；为空时降级为本地 PDF2HTML_BIN 二进制
       PDF2HTML_URL: ${PDF2HTML_URL:-http://pdf2html:7000}
       # PDF 转可编辑：soffice/pandoc 仍在后端镜像内本地执行
@@ -120,9 +124,9 @@ services:
 
   # OnlyOffice Document Server（docx/odt 原格式编辑）
   # AGPL 许可，仅自用/内部部署合规；商业发行需购买商业版
+  # 9.4 起移除 RabbitMQ/Postgres 依赖，单进程架构，社区版无 20 连接限制
   onlyoffice:
-    # 固定版本标签，避免 :latest 不可重现升级带来 breaking change
-    image: onlyoffice/documentserver:8.2
+    image: onlyoffice/documentserver:9.4
     container_name: lxdoc-onlyoffice
     environment:
       JWT_ENABLED: "true"
@@ -138,6 +142,21 @@ services:
     #   - "8081:80"
     expose:
       - "80"
+    restart: unless-stopped
+    mem_limit: 2g
+    cpus: 2
+
+  # kkFileView 统一预览服务（100+ 格式开箱即用，仅 compose 内网，经 nginx 反代 /kkview）
+  # 内置 LibreOffice，作为 docx/odt/pdf 等保真预览的统一入口，替代 pandoc/pdf2htmlEX 预览降级链路
+  kkfileview:
+    image: keking/kkfileview:4.4.0
+    container_name: lxdoc-kkfileview
+    environment:
+      # kkFileView 拉取文件需访问后端，通过 host 服务名解析（同 default 网络）
+      KK_CONTEXT_PATH: /onlinePreview
+    expose:
+      - "8012"
+    # 软依赖：后端不强制等待，kkFileView 未就绪时预览接口返回 503，前端回退
     restart: unless-stopped
     mem_limit: 2g
     cpus: 2

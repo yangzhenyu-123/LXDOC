@@ -100,6 +100,18 @@ export async function getPdfHtml(id: string): Promise<string> {
 }
 
 /**
+ * 获取 kkFileView 统一预览 URL（前端 iframe 嵌入）
+ * GET /documents/:id/kkview
+ * 返回 { url: string }，kkFileView 未启用时后端返回 503
+ */
+export async function getKkViewUrl(id: string): Promise<string> {
+  const res = await client.get<{ url: string }, { url: string }>(
+    `/documents/${id}/kkview`,
+  );
+  return res?.url ?? '';
+}
+
+/**
  * 将 PDF 转为可编辑的新 markdown 文档（原 PDF 保留）
  * POST /documents/:id/convert-to-editable
  * 返回新创建的文档
