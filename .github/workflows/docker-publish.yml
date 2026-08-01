@@ -1,13 +1,13 @@
 # LXDOC Docker 镜像构建与发布
 #
 # 触发：推送 v* 格式的 tag（如 v1.0.0、v1.0.0-rc1）
-# 产出：构建 backend / frontend / pdf2html 三个镜像，推送到 GHCR（公开）
+# 产出：构建 backend / frontend / pdf2html / backup 四个镜像，推送到 GHCR（公开）
 # 标签策略：
 #   - ghcr.io/<owner>/lxdoc-<name>:<tag>      （版本号，如 v1.0.0）
 #   - ghcr.io/<owner>/lxdoc-<name>:latest     （最新稳定版）
 # 权限：workflow 需 write:packages 权限推 GHCR（已在 permissions 声明）
 #
-# 说明：onlyoffice / postgres 使用官方镜像，无需构建
+# 说明：onlyoffice / postgres / kkfileview / docling 使用官方/第三方镜像，无需构建
 #       pdf2html 的 AppImage 仅为 amd64，故本 workflow 只构建 linux/amd64
 name: Publish Docker Images
 
@@ -29,7 +29,7 @@ jobs:
       packages: write   # 推送 GHCR 所需权限
     strategy:
       matrix:
-        # 三个需构建的镜像：name=镜像后缀，context=构建上下文，dockerfile=Dockerfile 路径
+        # 四个需构建的镜像：name=镜像后缀，context=构建上下文，dockerfile=Dockerfile 路径
         include:
           - name: backend
             context: ./server
@@ -46,6 +46,12 @@ jobs:
           - name: pdf2html
             context: ./docker/pdf2html
             dockerfile: ./docker/pdf2html/Dockerfile
+            build_contexts: ''
+          # backup 镜像：alpine + postgresql-client + cron，定时 pg_dump + uploads tar
+          # Dockerfile 从仓库根 COPY docker/backup.sh，故 context 为仓库根
+          - name: backup
+            context: .
+            dockerfile: ./docker/Dockerfile.backup
             build_contexts: ''
     steps:
       - name: Checkout
