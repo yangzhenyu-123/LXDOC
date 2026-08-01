@@ -36,6 +36,14 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/SearchView.vue'),
   },
   {
+    // 快捷入口视图：最近/收藏/我的文档/我的组/标签
+    // type: recent | favorites | my | my-org | tag
+    // tag 类型时 query.t 指定标签名
+    path: '/quick/:type',
+    name: 'quick-access',
+    component: () => import('@/views/QuickAccessView.vue'),
+  },
+  {
     path: '/admin/users',
     name: 'admin-users',
     component: () => import('@/views/admin/UsersView.vue'),
@@ -52,6 +60,26 @@ const routes: RouteRecordRaw[] = [
     name: 'admin-audit',
     component: () => import('@/views/admin/AuditView.vue'),
     meta: { roles: ['admin'] },
+  },
+  {
+    // 系统配置：展示 LLM / OnlyOffice / kkFileView / docling 等各服务开关与状态
+    path: '/admin/system',
+    name: 'admin-system',
+    component: () => import('@/views/admin/SystemConfigView.vue'),
+    meta: { roles: ['admin'] },
+  },
+  {
+    // LLM 配置管理（admin）：创建多套 LLM 配置供用户选择
+    path: '/admin/llm-configs',
+    name: 'admin-llm-configs',
+    component: () => import('@/views/admin/LlmConfigView.vue'),
+    meta: { roles: ['admin'] },
+  },
+  {
+    // 个人设置（所有登录用户）：选择 LLM 配置等
+    path: '/profile',
+    name: 'profile',
+    component: () => import('@/views/ProfileView.vue'),
   },
 ];
 

@@ -4,6 +4,10 @@ import ElementPlus from 'element-plus';
 import 'element-plus/dist/index.css';
 import * as ElementPlusIconsVue from '@element-plus/icons-vue';
 
+// LXDOC 设计令牌 + 全局样式（必须在 Element Plus 之后引入以覆盖其变量）
+import './styles/tokens.css';
+import './styles/global.css';
+
 import App from './App.vue';
 import router from './router';
 import { vPermission } from './directives/permission';

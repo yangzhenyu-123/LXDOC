@@ -1,3 +1,4 @@
+import { join } from 'path';
 import {
   Module,
   OnApplicationBootstrap,
@@ -20,6 +21,7 @@ import { AuthModule } from './auth/auth.module';
 import { AuditModule } from './audit/audit.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { LlmModule } from './llm/llm.module';
+import { SystemModule } from './system/system.module';
 import { AuditInterceptor } from './audit/audit.interceptor';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
@@ -27,8 +29,11 @@ import { RolesGuard } from './common/guards/roles.guard';
 @Module({
   imports: [
     // 全局加载 .env 环境变量
+    // 显式指定 envFilePath 基于 __dirname，避免 nest start --watch 的 cwd 不稳定导致 .env 加载失败
+    // （nest CLI watch 模式下进程 cwd 可能为项目根目录而非 server/，此处统一解析到 server/.env）
     ConfigModule.forRoot({
       isGlobal: true,
+      envFilePath: join(__dirname, '..', '.env'),
     }),
     // 全局限流：默认每分钟 60 次，防暴力破解与滥用。敏感端点（如 login）单独收紧
     ThrottlerModule.forRoot([
@@ -62,6 +67,8 @@ import { RolesGuard } from './common/guards/roles.guard';
     OrganizationsModule,
     // LLM 接入模块（Provider 抽象 + GLM5.2 实现 + 健康检查，业务模块按需注入）
     LlmModule,
+    // 系统配置模块（GET /api/system/config，仅 admin，返回各服务运行时配置）
+    SystemModule,
   ],
   providers: [
     // 全局守卫：ThrottlerGuard 限流（最前，防暴力请求穿透认证），

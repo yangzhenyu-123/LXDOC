@@ -39,6 +39,20 @@ export interface LlmChatOptions {
   maxTokens?: number;
   /** 超时（毫秒），覆盖配置 */
   timeout?: number;
+  /**
+   * 是否启用推理（thinking/reasoning）模式，默认 true。
+   * 推理模型（如 GLM-5.2）开启时会先输出 reasoning_content 再输出 content，
+   * 适合复杂任务（总结、分析）；简单任务（分类路径、标签生成）可设为 false
+   * 跳过推理直接输出，省 token 且响应更快。
+   * 不支持推理的 Provider 忽略此选项。
+   */
+  enableThinking?: boolean;
+  /**
+   * 连接覆盖（admin 配置多套 LLM 时，按用户选择的 LlmConfig 注入）。
+   * 省略时 Provider 使用全局 llmConfig。
+   */
+  baseUrl?: string;
+  apiKey?: string;
 }
 
 /**

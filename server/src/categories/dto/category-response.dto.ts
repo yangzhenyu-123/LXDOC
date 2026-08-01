@@ -1,5 +1,4 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { CategoryType } from '../category.entity';
 
 /**
  * 分类响应 DTO
@@ -15,8 +14,8 @@ export class CategoryResponseDto {
   @ApiProperty({ description: '分类名称', example: '前端指南' })
   name: string;
 
-  @ApiProperty({ description: '分类类型（子分类可能为 null）', enum: CategoryType, example: 'tech_doc', nullable: true })
-  type: CategoryType | null;
+  @ApiProperty({ description: '分类类型（字符串，子分类可能为 null）', example: 'tech_doc', nullable: true })
+  type: string | null;
 
   @ApiProperty({ description: '排序值', example: 0 })
   sort: number;

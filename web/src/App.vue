@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   ElMessage,
@@ -8,10 +8,15 @@ import {
   type FormRules,
 } from 'element-plus';
 import CategoryTree from '@/components/CategoryTree.vue';
+import KnowledgeTree from '@/components/KnowledgeTree.vue';
 import { useAuthStore } from '@/stores/auth';
 import { changePasswordApi } from '@/api/auth';
+import { getKnowledgeTree } from '@/api/knowledge';
 
-// LXDOC 根组件：顶部栏（Logo + 搜索 + 上传 + 用户菜单）+ 左侧分类树 + 主区路由出口
+// LXDOC 根组件：三栏布局
+//  - 顶栏：Logo + 全局搜索 + 上传 + 用户菜单
+//  - 左侧导航栏：顶部三分区切换图标（文档库/知识库/配置）+ 下方对应导航内容
+//  - 主区：路由出口
 const router = useRouter();
 const route = useRoute();
 const authStore = useAuthStore();
@@ -19,8 +24,12 @@ const authStore = useAuthStore();
 // 全局搜索框输入
 const globalKeyword = ref('');
 
-// 左侧分类树是否折叠
-const asideCollapsed = ref(false);
+// 当前激活的左侧导航分区：docs(文档库) / knowledge(AI知识库) / settings(配置管理)
+type NavZone = 'docs' | 'knowledge' | 'settings';
+const activeZone = ref<NavZone>('docs');
+
+// 左侧导航栏整体是否折叠（仅折叠内容区，分区图标始终可见）
+const navCollapsed = ref(false);
 
 /**
  * 提交全局搜索：跳转到 /search?q=...
@@ -29,6 +38,8 @@ function submitSearch() {
   const q = globalKeyword.value.trim();
   if (!q) return;
   router.push({ path: '/search', query: { q } });
+  // 搜索时切到文档库分区，避免在配置分区下搜索无左侧树回退
+  activeZone.value = 'docs';
 }
 
 /**
@@ -36,13 +47,31 @@ function submitSearch() {
  */
 function goHome() {
   router.push('/');
+  activeZone.value = 'docs';
 }
 
 /**
- * 切换左侧分类树折叠状态
+ * 切换左侧导航栏折叠状态
  */
-function toggleAside() {
-  asideCollapsed.value = !asideCollapsed.value;
+function toggleNav() {
+  navCollapsed.value = !navCollapsed.value;
+}
+
+/**
+ * 切换左侧导航分区
+ */
+function switchZone(zone: NavZone) {
+  activeZone.value = zone;
+  // 切到配置分区时按需跳转对应管理页
+  if (zone === 'settings') {
+    // 默认进入系统配置页（若已在某个 admin 页则保持）
+    const adminPaths = ['/admin/users', '/admin/organizations', '/admin/audit', '/admin/system', '/admin/llm-configs'];
+    if (!adminPaths.some((p) => route.path.startsWith(p))) {
+      router.push('/admin/system');
+    }
+  } else if (zone === 'knowledge') {
+    // 知识库分区：保持在首页或当前文档页均可，不强制跳转
+  }
 }
 
 /**
@@ -50,6 +79,7 @@ function toggleAside() {
  */
 function quickUpload() {
   router.push('/');
+  activeZone.value = 'docs';
 }
 
 /**
@@ -57,6 +87,31 @@ function quickUpload() {
  */
 function onSelectCategory(categoryId: string) {
   router.push(`/c/${categoryId}`);
+}
+
+/**
+ * 快捷入口跳转
+ */
+function goQuick(type: 'recent' | 'favorites' | 'my' | 'my-org') {
+  router.push(`/quick/${type}`);
+}
+
+// 当前快捷入口高亮（基于路由）
+const activeQuick = computed(() => {
+  if (route.path === '/quick/recent') return 'recent';
+  if (route.path === '/quick/favorites') return 'favorites';
+  if (route.path === '/quick/my') return 'my';
+  if (route.path === '/quick/my-org') return 'my-org';
+  return '';
+});
+
+/**
+ * KnowledgeTree 选中节点：跳转到对应文档或分类
+ */
+function onSelectKnowledge(payload: { type: 'doc' | 'dir'; id?: string; path?: string }) {
+  if (payload.type === 'doc' && payload.id) {
+    router.push(`/read/${payload.id}`);
+  }
 }
 
 // ============== 用户菜单与修改密码 ==============
@@ -101,6 +156,41 @@ const avatarText = computed(() => {
 
 // 是否在公共路由（如登录页）：不显示主布局
 const isPublicRoute = computed(() => !!route.meta.public);
+
+// 配置管理子菜单高亮：根据当前路由判断
+const activeSettingsMenu = computed(() => {
+  if (route.path.startsWith('/admin/users')) return 'users';
+  if (route.path.startsWith('/admin/organizations')) return 'organizations';
+  if (route.path.startsWith('/admin/audit')) return 'audit';
+  if (route.path.startsWith('/admin/system')) return 'system';
+  if (route.path.startsWith('/admin/llm-configs')) return 'llm';
+  return '';
+});
+
+// 当前路由是否在文档库相关页面（首页/分类/文档详情/搜索）
+const isDocsRoute = computed(() => {
+  return (
+    route.path === '/' ||
+    route.path.startsWith('/c/') ||
+    route.path.startsWith('/d/') ||
+    route.path.startsWith('/read/') ||
+    route.path.startsWith('/search')
+  );
+});
+
+// 根据当前路由自动切换分区（首次加载/路由变化时）
+watch(
+  () => route.path,
+  (p) => {
+    if (p.startsWith('/admin')) {
+      activeZone.value = 'settings';
+    } else if (p === '/' || p.startsWith('/c/') || p.startsWith('/d/') || p.startsWith('/search')) {
+      // /read/ 也可能在知识库分区点击后进入，保持当前分区
+      activeZone.value = 'docs';
+    }
+  },
+  { immediate: true },
+);
 
 /**
  * 打开修改密码对话框
@@ -152,27 +242,6 @@ async function handleLogout() {
 }
 
 /**
- * 跳转用户管理页
- */
-function goUsers() {
-  router.push('/admin/users');
-}
-
-/**
- * 跳转组织管理页
- */
-function goOrganizations() {
-  router.push('/admin/organizations');
-}
-
-/**
- * 跳转审计日志页
- */
-function goAudit() {
-  router.push('/admin/audit');
-}
-
-/**
  * 下拉菜单 command 分发
  */
 function handleCommand(cmd: string) {
@@ -180,17 +249,34 @@ function handleCommand(cmd: string) {
     case 'password':
       openChangePassword();
       break;
+    case 'profile':
+      router.push('/profile');
+      break;
     case 'logout':
       handleLogout();
       break;
+  }
+}
+
+/**
+ * 配置管理子菜单跳转
+ */
+function goSettings(menu: 'users' | 'organizations' | 'audit' | 'system' | 'llm') {
+  switch (menu) {
     case 'users':
-      goUsers();
+      router.push('/admin/users');
       break;
     case 'organizations':
-      goOrganizations();
+      router.push('/admin/organizations');
       break;
     case 'audit':
-      goAudit();
+      router.push('/admin/audit');
+      break;
+    case 'system':
+      router.push('/admin/system');
+      break;
+    case 'llm':
+      router.push('/admin/llm-configs');
       break;
   }
 }
@@ -205,23 +291,13 @@ onMounted(() => {
   <!-- 公共路由（如登录页）：仅渲染路由出口，不显示主布局 -->
   <router-view v-if="isPublicRoute" />
 
-  <!-- 主布局：顶部栏 + 左侧分类树 + 主区路由出口 -->
+  <!-- 主布局：顶栏 + 左侧导航栏（分区切换 + 导航内容）+ 主区路由出口 -->
   <div v-else class="app-layout">
     <!-- 顶部栏：Logo + 全局搜索框 + 上传快捷按钮 + 用户菜单 -->
     <header class="app-header">
       <div class="header-left">
-        <el-button
-          class="collapse-btn"
-          text
-          :title="asideCollapsed ? '展开分类树' : '折叠分类树'"
-          @click="toggleAside"
-        >
-          <el-icon size="18">
-            <Fold v-if="!asideCollapsed" />
-            <Expand v-else />
-          </el-icon>
-        </el-button>
         <span class="logo" @click="goHome">LXDOC</span>
+        <span class="logo-sub">企业知识库</span>
       </div>
       <div class="global-search">
         <el-input
@@ -252,35 +328,154 @@ onMounted(() => {
         <!-- 用户下拉菜单 -->
         <el-dropdown trigger="click" @command="handleCommand">
           <span class="user-trigger">
-            <el-avatar :size="28" class="user-avatar">{{ avatarText }}</el-avatar>
+            <el-avatar :size="30" class="user-avatar">{{ avatarText }}</el-avatar>
             <span class="user-name">{{ authStore.user?.username || authStore.user?.email || '用户' }}</span>
             <el-icon><ArrowDown /></el-icon>
           </span>
           <template #dropdown>
             <el-dropdown-menu>
+              <el-dropdown-item command="profile">个人设置</el-dropdown-item>
               <el-dropdown-item command="password">修改密码</el-dropdown-item>
               <el-dropdown-item divided command="logout">退出登录</el-dropdown-item>
-              <template v-if="authStore.isAdmin">
-                <el-dropdown-item divided command="users">用户管理</el-dropdown-item>
-                <el-dropdown-item command="organizations">组织管理</el-dropdown-item>
-                <el-dropdown-item command="audit">审计日志</el-dropdown-item>
-              </template>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
       </div>
     </header>
 
-    <!-- 主区：左侧分类树 + 右侧路由出口 -->
+    <!-- 主区：左侧导航栏 + 右侧路由出口 -->
     <div class="app-body">
-      <aside
-        class="app-aside"
-        :class="{ collapsed: asideCollapsed }"
-      >
-        <div class="aside-inner">
-          <CategoryTree @select="onSelectCategory" />
+      <nav class="nav-bar" :class="{ collapsed: navCollapsed }">
+        <!-- 分区切换图标列 -->
+        <div class="zone-rail">
+          <button
+            class="zone-btn"
+            :class="{ active: activeZone === 'docs' }"
+            title="文档库"
+            @click="switchZone('docs')"
+          >
+            <el-icon size="20"><Files /></el-icon>
+            <span class="zone-label">文档库</span>
+          </button>
+          <button
+            class="zone-btn"
+            :class="{ active: activeZone === 'knowledge' }"
+            title="AI 知识库"
+            @click="switchZone('knowledge')"
+          >
+            <el-icon size="20"><MagicStick /></el-icon>
+            <span class="zone-label">知识库</span>
+          </button>
+          <button
+            v-if="authStore.isAdmin"
+            class="zone-btn"
+            :class="{ active: activeZone === 'settings' }"
+            title="配置管理"
+            @click="switchZone('settings')"
+          >
+            <el-icon size="20"><Setting /></el-icon>
+            <span class="zone-label">配置</span>
+          </button>
+          <!-- 底部折叠按钮 -->
+          <button class="zone-btn collapse-btn" title="折叠/展开" @click="toggleNav">
+            <el-icon size="18">
+              <Fold v-if="!navCollapsed" />
+              <Expand v-else />
+            </el-icon>
+          </button>
         </div>
-      </aside>
+
+        <!-- 分区导航内容 -->
+        <div class="zone-panel" v-show="!navCollapsed">
+          <!-- 文档库：快捷入口 + 分类树 -->
+          <div v-show="activeZone === 'docs'" class="panel-section">
+            <div class="panel-header">
+              <span class="panel-title">分类目录</span>
+            </div>
+            <div class="panel-body">
+              <!-- 快捷入口 -->
+              <ul class="quick-menu">
+                <li :class="{ active: activeQuick === 'recent' }" @click="goQuick('recent')">
+                  <el-icon><Clock /></el-icon>
+                  <span>最近更新</span>
+                </li>
+                <li :class="{ active: activeQuick === 'favorites' }" @click="goQuick('favorites')">
+                  <el-icon><StarFilled /></el-icon>
+                  <span>我的收藏</span>
+                </li>
+                <li :class="{ active: activeQuick === 'my' }" @click="goQuick('my')">
+                  <el-icon><User /></el-icon>
+                  <span>我的文档</span>
+                </li>
+                <li :class="{ active: activeQuick === 'my-org' }" @click="goQuick('my-org')">
+                  <el-icon><OfficeBuilding /></el-icon>
+                  <span>我的组文档</span>
+                </li>
+              </ul>
+              <div class="quick-divider"></div>
+              <!-- 分类树 -->
+              <CategoryTree @select="onSelectCategory" />
+            </div>
+          </div>
+
+          <!-- AI 知识库：知识树 -->
+          <div v-show="activeZone === 'knowledge'" class="panel-section">
+            <div class="panel-header">
+              <span class="panel-title">AI 知识库</span>
+            </div>
+            <div class="panel-body">
+              <KnowledgeTree @select="onSelectKnowledge" />
+            </div>
+          </div>
+
+          <!-- 配置管理：菜单列表 -->
+          <div v-show="activeZone === 'settings' && authStore.isAdmin" class="panel-section">
+            <div class="panel-header">
+              <span class="panel-title">配置管理</span>
+            </div>
+            <div class="panel-body">
+              <ul class="settings-menu">
+                <li
+                  :class="{ active: activeSettingsMenu === 'system' }"
+                  @click="goSettings('system')"
+                >
+                  <el-icon><Tools /></el-icon>
+                  <span>系统配置</span>
+                </li>
+                <li
+                  :class="{ active: activeSettingsMenu === 'llm' }"
+                  @click="goSettings('llm')"
+                >
+                  <el-icon><MagicStick /></el-icon>
+                  <span>用户LLM配置</span>
+                </li>
+                <li
+                  :class="{ active: activeSettingsMenu === 'users' }"
+                  @click="goSettings('users')"
+                >
+                  <el-icon><User /></el-icon>
+                  <span>用户管理</span>
+                </li>
+                <li
+                  :class="{ active: activeSettingsMenu === 'organizations' }"
+                  @click="goSettings('organizations')"
+                >
+                  <el-icon><OfficeBuilding /></el-icon>
+                  <span>组织管理</span>
+                </li>
+                <li
+                  :class="{ active: activeSettingsMenu === 'audit' }"
+                  @click="goSettings('audit')"
+                >
+                  <el-icon><Document /></el-icon>
+                  <span>审计日志</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </nav>
+
       <main class="app-main">
         <router-view />
       </main>
@@ -338,54 +533,46 @@ onMounted(() => {
   </div>
 </template>
 
-<style>
-html,
-body,
-#app {
-  margin: 0;
-  padding: 0;
-  height: 100%;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
-    Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif;
-}
-</style>
-
 <style scoped>
 .app-layout {
   display: flex;
   flex-direction: column;
   height: 100%;
 }
+/* ============ 顶栏 ============ */
 .app-header {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 0 16px;
+  gap: var(--lx-space-4);
+  padding: 0 var(--lx-space-5);
   height: 56px;
-  background: #001529;
-  color: #fff;
+  background: var(--lx-gradient-header);
+  color: var(--lx-header-text);
   flex-shrink: 0;
-  border-bottom: 1px solid #001529;
+  box-shadow: var(--lx-shadow-header);
+  z-index: var(--lx-z-header);
 }
 .header-left {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: baseline;
+  gap: var(--lx-space-2);
   flex-shrink: 0;
 }
-.collapse-btn {
-  color: #fff;
-}
-.collapse-btn:hover {
-  color: #fff;
-}
 .logo {
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  color: #fff;
+  font-size: var(--lx-font-2xl);
+  font-weight: var(--lx-font-bold);
+  letter-spacing: 1.5px;
   cursor: pointer;
   user-select: none;
+  background: linear-gradient(90deg, var(--lx-primary-400), var(--lx-accent-400));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.logo-sub {
+  font-size: var(--lx-font-xs);
+  color: var(--lx-header-text-muted);
+  letter-spacing: 0.5px;
 }
 .global-search {
   flex: 1;
@@ -395,57 +582,207 @@ body,
 .header-right {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--lx-space-3);
   flex-shrink: 0;
 }
 .user-trigger {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--lx-space-2);
   cursor: pointer;
-  color: #fff;
+  color: var(--lx-header-text);
   outline: none;
+  padding: var(--lx-space-1) var(--lx-space-2);
+  border-radius: var(--lx-radius-sm);
+  transition: background var(--lx-transition-fast);
+}
+.user-trigger:hover {
+  background: var(--lx-header-hover);
 }
 .user-avatar {
-  background: #1890ff;
-  color: #fff;
-  font-size: 14px;
-  font-weight: 600;
+  background: var(--lx-gradient-primary);
+  color: var(--lx-text-inverse);
+  font-size: var(--lx-font-sm);
+  font-weight: var(--lx-font-semibold);
 }
 .user-name {
-  font-size: 14px;
+  font-size: var(--lx-font-base);
   max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ============ 主区 ============ */
 .app-body {
   flex: 1;
   display: flex;
   overflow: hidden;
 }
-.app-aside {
-  width: 240px;
+
+/* ============ 左侧导航栏 ============ */
+.nav-bar {
+  display: flex;
+  width: 256px;
   flex-shrink: 0;
-  background: #fff;
-  border-right: 1px solid #e4e7ed;
+  background: var(--lx-bg-elevated);
+  border-right: 1px solid var(--lx-border);
+  transition: width var(--lx-transition);
   overflow: hidden;
-  transition: width 0.2s ease;
 }
-.app-aside.collapsed {
-  width: 0;
-  border-right: none;
+.nav-bar.collapsed {
+  width: 64px;
 }
-.aside-inner {
-  width: 240px;
+
+/* 分区切换图标列 */
+.zone-rail {
+  width: 64px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: var(--lx-space-3) 0 var(--lx-space-2);
+  gap: var(--lx-space-1);
+  background: var(--lx-bg-subtle);
+  border-right: 1px solid var(--lx-border);
+}
+.zone-btn {
+  width: 52px;
+  height: 52px;
+  border: none;
+  background: transparent;
+  border-radius: var(--lx-radius-md);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  cursor: pointer;
+  color: var(--lx-text-secondary);
+  transition: all var(--lx-transition-fast);
+  position: relative;
+}
+.zone-btn:hover {
+  background: var(--lx-primary-50);
+  color: var(--lx-primary);
+}
+.zone-btn.active {
+  background: var(--lx-gradient-primary);
+  color: var(--lx-text-inverse);
+  box-shadow: var(--lx-shadow-primary);
+}
+.zone-label {
+  font-size: var(--lx-font-xs);
+  line-height: 1;
+}
+.collapse-btn {
+  margin-top: auto;
+  height: 44px;
+  width: 52px;
+}
+
+/* 分区导航内容面板 */
+.zone-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.panel-section {
+  display: flex;
+  flex-direction: column;
   height: 100%;
+}
+.panel-header {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--lx-space-4);
+  border-bottom: 1px solid var(--lx-border-light);
+  flex-shrink: 0;
+}
+.panel-title {
+  font-size: var(--lx-font-sm);
+  font-weight: var(--lx-font-semibold);
+  color: var(--lx-text-regular);
+  letter-spacing: 0.5px;
+}
+.panel-body {
+  flex: 1;
   overflow: auto;
-  padding: 8px;
+  padding: var(--lx-space-2);
   box-sizing: border-box;
 }
+
+/* 快捷入口菜单 */
+.quick-menu {
+  list-style: none;
+  margin: 0 0 var(--lx-space-2);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.quick-menu li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: var(--lx-radius-md);
+  cursor: pointer;
+  color: var(--lx-text-regular);
+  font-size: var(--lx-font-sm);
+  transition: all var(--lx-transition-fast);
+}
+.quick-menu li:hover {
+  background: var(--lx-primary-50);
+  color: var(--lx-primary);
+}
+.quick-menu li.active {
+  background: linear-gradient(90deg, var(--lx-primary-100), var(--lx-primary-50));
+  color: var(--lx-primary-700);
+  font-weight: var(--lx-font-semibold);
+}
+.quick-divider {
+  height: 1px;
+  background: var(--lx-border-light);
+  margin: var(--lx-space-2) 0;
+}
+
+/* 配置管理菜单 */
+.settings-menu {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-menu li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--lx-radius-md);
+  cursor: pointer;
+  color: var(--lx-text-regular);
+  font-size: var(--lx-font-base);
+  transition: all var(--lx-transition-fast);
+}
+.settings-menu li:hover {
+  background: var(--lx-primary-50);
+  color: var(--lx-primary);
+}
+.settings-menu li.active {
+  background: linear-gradient(90deg, var(--lx-primary-100), var(--lx-primary-50));
+  color: var(--lx-primary-700);
+  font-weight: var(--lx-font-semibold);
+}
+
+/* ============ 主路由区 ============ */
 .app-main {
   flex: 1;
   overflow: auto;
-  background: #f5f7fa;
+  background: var(--lx-bg);
 }
 </style>

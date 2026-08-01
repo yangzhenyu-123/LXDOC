@@ -106,10 +106,10 @@ tar czf uploads-$(date +%F).tar.gz uploads/
 |---|---|---|
 | `frontend` | 8080 | nginx 托管前端 + 反代 `/api`、`/onlyoffice`、`/kkview` |
 | `backend` | 3000 | NestJS API（不对外，经 nginx 反代） |
-| `onlyoffice` | 8081 | OnlyOffice Document Server 9.4（不对外，经 nginx 反代） |
-| `kkfileview` | 8012 | kkFileView 统一预览（不对外，经 nginx 反代） |
-| `pdf2html` | 7000 | pdf2htmlEX sidecar（仅内网，kkFileView 不可用时的回退） |
-| `postgres` | 5432 | PostgreSQL 16（仅内网） |
+| `onlyoffice` | 80（内部） | OnlyOffice Document Server 9.4（不对外，经 nginx 反代为 `/onlyoffice`） |
+| `kkfileview` | 8012（内部） | kkFileView 统一预览（不对外，经 nginx 反代为 `/kkview`） |
+| `pdf2html` | 7000（内部） | pdf2htmlEX sidecar（仅内网，kkFileView 不可用时的回退） |
+| `postgres` | 5432（内部） | PostgreSQL 16（仅内网） |
 
 > 仅 `8080` 对外暴露，其余服务均在内部网络，最小攻击面。
 
@@ -125,6 +125,7 @@ tar czf uploads-$(date +%F).tar.gz uploads/
 
 1. 在能联网的机器拉取镜像并导出：
    ```bash
+   # 快速启动编排（quickstart）所需镜像
    docker pull ghcr.io/yangzhenyu-123/lxdoc-backend:latest
    docker pull ghcr.io/yangzhenyu-123/lxdoc-frontend:latest
    docker pull ghcr.io/yangzhenyu-123/lxdoc-pdf2html:latest
@@ -139,7 +140,8 @@ tar czf uploads-$(date +%F).tar.gz uploads/
      keking/kkfileview:4.4.0 \
      postgres:16-alpine
    ```
-2. 将 `lxdoc-images.tar`、`docker-compose.quickstart.yml` 拷贝到内网服务器
+   > 完整编排（`docker-compose.yml`）额外需要 `keking/kkfileview:5.1.0` 与 `docling-serve:cpu-latest`（启用 docling 时），可一并 `docker pull` 后加入 `docker save` 列表。
+2. 将 `lxdoc-images.tar`、`docker-compose.quickstart.yml`（或 `docker-compose.yml`）拷贝到内网服务器
 3. 内网服务器导入镜像：`docker load -i lxdoc-images.tar`
 4. 后续步骤同上（创建 `.env`、`docker compose ... up -d`）
 
@@ -163,12 +165,13 @@ docker compose up -d
 | 服务 | 端口 | 说明 |
 |---|---|---|
 | `frontend` | 8080 | nginx 托管前端 + 反代 `/api`、`/onlyoffice`、`/kkview` |
-| `backend` | 3000 | NestJS API |
-| `onlyoffice` | 8081 | OnlyOffice Document Server 9.4 |
-| `kkfileview` | 8012 | kkFileView 统一预览（100+ 格式，仅内网） |
-| `pdf2html` | 7000 | pdf2htmlEX sidecar（PDF 版式预览回退，仅内网） |
-| `docling` | 5001 | docling-serve sidecar（统一文档解析，仅内网，可选） |
-| `postgres` | 5432 | PostgreSQL 16 |
+| `backend` | 3000（内部） | NestJS API |
+| `onlyoffice` | 80（内部） | OnlyOffice Document Server 9.4 |
+| `kkfileview` | 8012（内部） | kkFileView 5.1.0 统一预览（130+ 格式，仅内网） |
+| `pdf2html` | 7000（内部） | pdf2htmlEX sidecar（PDF 版式预览回退，仅内网） |
+| `docling` | 5001（内部） | docling-serve sidecar（统一文档解析，仅内网，可选） |
+| `backup` | - | 定时备份容器（cron + pg_dump + tar 打包 uploads/） |
+| `postgres` | 5432（内部） | PostgreSQL 16 |
 
 启动后访问 http://localhost:8080，默认管理员 `admin@lxdoc.local` / `lxdoc12345`（开发环境；生产需在 `.env` 设置 `ADMIN_PASSWORD`）。
 
@@ -250,13 +253,14 @@ LXDOC 上传文档采用「docling 为主 + 本地回退」双层解析，支持
 - 镜像 `onlyoffice/documentserver:9.4`（9.4 起移除 RabbitMQ/Postgres 依赖，单进程架构，社区版无 20 连接限制；AGPL 许可，仅自用/内部部署合规）
 - `JWT_ENABLED=true` + `JWT_SECRET` 与后端 `ONLYOFFICE_JWT_SECRET` 共享
 - 持久化卷：`onlyoffice-data`（文档转换缓存与字体）、`onlyoffice-cache`
-- 端口 8081:80，前端经 nginx 反代为同源 `/onlyoffice`
+- 端口 80（`expose: ["80"]`，不映射到宿主机），前端经 nginx 反代为同源 `/onlyoffice`
 
 ### kkfileview
 
-- 镜像 `keking/kkfileview:4.4.0`（开源预览中间件，内置 LibreOffice，支持 100+ 格式）
-- 作为 docx/odt/pdf 等保真预览的统一入口，替代 pandoc/pdf2htmlEX 预览降级链路
-- 端口 8012，前端经 nginx 反代为同源 `/kkview`
+- 镜像 `keking/kkfileview:5.1.0`（开源预览中间件，内置 LibreOffice，支持 130+ 格式；quickstart/dev 编排为 `4.4.0`，完整编排升级到 5.1.0）
+- 作为 Office/PDF/附件等保真预览的统一入口，替代 pandoc/pdf2htmlEX 预览降级链路
+- 5.1.0 新增 `TrustHostFilter`：kkfileview 拉取文件时校验文件 URL 的 host 是否在信任列表，需在 kkfileview 容器配置信任后端域名（compose 已配置）
+- 端口 8012，nginx 透传完整 URI（`proxy_pass` 不带尾斜杠），kkfileview 内部重定向天然含 `/kkview` 前缀（context-path 设为 `/kkview`）
 - 软依赖：未就绪时预览接口返回 503，前端自动回退 pdf2htmlEX
 
 ### frontend（nginx）
@@ -327,20 +331,103 @@ LXDOC 上传文档采用「docling 为主 + 本地回退」双层解析，支持
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `LLM_ENABLED` | false | 是否启用 LLM（false 时 chat/embed 返回 null，业务降级） |
-| `LLM_BASE_URL` | http://internal-glm/v1 | 内网 GLM OpenAI 兼容端点 |
-| `LLM_API_KEY` | （空） | 调用密钥，内网无需鉴权可留空 |
-| `LLM_MODEL` | glm-5.2 | 默认对话模型 |
-| `LLM_EMBED_MODEL` | （空） | 向量模型，留空则 RAG 向量检索禁用 |
-| `LLM_EMBED_DIMENSIONS` | 0 | 向量维度，与 pgvector 列对齐 |
-| `LLM_TIMEOUT` | 30000 | 单次请求超时（毫秒） |
-| `LLM_MAX_RETRIES` | 2 | 最大重试次数（指数退避） |
+| `LLM_ENABLED` | false | 是否启用 LLM 系统级开关（false 时 chat/embed 返回 null，业务降级；可在线改） |
+| `LLM_BASE_URL` | http://internal-glm/v1 | 内网 GLM OpenAI 兼容端点（系统级；可在线改） |
+| `LLM_API_KEY` | （空） | 调用密钥，内网无需鉴权可留空（系统级；可在线改，敏感项） |
+| `LLM_MODEL` | glm-5.2 | 默认对话模型（系统级；可在线改） |
+| `LLM_TIMEOUT` | 30000 | 单次请求超时（毫秒），总结任务内部取 max(timeout, 120000)；可在线改 |
+| `LLM_MAX_RETRIES` | 2 | 最大重试次数（指数退避）；可在线改 |
+| `LLM_SUMMARY_MAX_CHARS` | 80000 | 总结单次投喂文本上限（字符数）；可在线改 |
+| `LLM_EMBED_MODEL` | （空） | 向量模型，留空则 RAG 向量检索禁用（**不可在线改**，仅 env） |
+| `LLM_EMBED_DIMENSIONS` | 0 | 向量维度，与 pgvector 列对齐（**不可在线改**，仅 env） |
+
+> `enableThinking` **不是**系统配置，仅是用户级字段（`User.llmEnableThinking`）。admin 回退系统配置时该字段硬编码为 `true`；普通用户必须自己配置（或由 admin 代为配置 `actAsUserId` 代理身份）。详见 [llm.md#用户级配置](./llm.md#用户级配置)。
 
 ### 前端
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `VITE_ONLYOFFICE_URL` | /onlyoffice | 浏览器加载 OnlyOffice api.js 的基础地址 |
+
+## 可在线修改的配置项
+
+admin 可通过 `GET/PUT /api/system/config` 在线修改 14 项运行时配置，写入 `system_settings` 表 + 内存覆盖层（`settings-overrides.ts`），**无需重启立即生效**。详见 [api-reference.md#系统配置-system](./api-reference.md#系统配置-system)。
+
+可改配置项（key 使用小写点分命名，按分组）：
+
+| 分组 | key | 类型 | 对应 env | 说明 |
+|---|---|---|---|---|
+| LLM | `llm.enabled` | boolean | `LLM_ENABLED` | LLM 系统级总开关 |
+| LLM | `llm.baseUrl` | string | `LLM_BASE_URL` | LLM 服务端点 |
+| LLM | `llm.apiKey` | string | `LLM_API_KEY` | LLM apiKey（敏感项，提交 `******` 视为不修改） |
+| LLM | `llm.model` | string | `LLM_MODEL` | 默认对话模型名 |
+| LLM | `llm.timeout` | number | `LLM_TIMEOUT` | 请求超时（毫秒） |
+| LLM | `llm.maxRetries` | number | `LLM_MAX_RETRIES` | 重试次数 |
+| LLM | `llm.summaryMaxChars` | number | `LLM_SUMMARY_MAX_CHARS` | 总结单次投喂文本上限（字符数） |
+| OnlyOffice | `onlyoffice.enabled` | boolean | `ONLYOFFICE_ENABLED` | OnlyOffice 总开关 |
+| kkFileView | `kkfileview.enabled` | boolean | `KKFILEVIEW_ENABLED` | kkFileView 总开关 |
+| docling | `docling.enabled` | boolean | `DOCLING_ENABLED` | docling 解析总开关 |
+| docling | `docling.doOcr` | boolean | `DOCLING_DO_OCR` | OCR 开关（扫描件 PDF） |
+| auth | `auth.allowSignup` | boolean | `ALLOW_SIGNUP` | 是否开放自注册 |
+| upload | `upload.maxDocFileSizeMB` | number | `UPLOAD_MAX_DOC_MB` | 主文档单文件大小上限（MB） |
+| upload | `upload.maxImageFileSizeMB` | number | `UPLOAD_MAX_IMAGE_MB` | 图片单文件大小上限（MB） |
+
+> 注意：`ONLYOFFICE_URL` / `BACKEND_PUBLIC_URL` / `KKFILEVIEW_URL` 等网络地址配置**不在**在线编辑范围（涉及容器间网络拓扑，重启才能安全生效），仅能在 `.env` 修改。`enableThinking` 也**不是**系统配置，仅是用户级字段（admin 回退系统配置时硬编码为 `true`）。
+
+**约束**：
+
+- DTO 必须使用 class-validator 装饰器，全局 ValidationPipe 启用 `forbidNonWhitelisted`，未声明字段会被 400 拒绝
+- 敏感项（apiKey）返回时脱敏为 `******`，提交时传 `******` 视为不修改
+- 修改后写入 `system_settings` 表 + 同步内存覆盖层，config getter 优先读覆盖层
+
+## 备份与恢复
+
+完整编排内置 `backup` 容器，定时备份数据库与上传文件：
+
+### 备份容器
+
+- 镜像：`docker/Dockerfile.backup`（基于 `postgres:16-alpine`，内置 `pg_dump` + busybox `crond`）
+- 脚本：`docker/backup.sh`（备份）/ `docker/restore.sh`（恢复），均可在容器内手动执行
+- 定时：busybox crond 前台运行，cron 表达式由 `BACKUP_CRON` 配置（默认 `0 2 * * *` = 每日凌晨 2:00）
+- 备份内容：
+  - 数据库：`pg_dump -F c -Z 6`（PostgreSQL custom 格式，压缩，支持选择性恢复）→ `<BACKUP_DIR>/<YYYYMMDD>/db_<YYYYMMDD_HHMMSS>.dump`
+  - 上传文件：`tar -czf` 打包 `uploads/`（原文件 + 图片 + 附件）→ `<BACKUP_DIR>/<YYYYMMDD>/uploads_<YYYYMMDD_HHMMSS>.tar.gz`
+- 持久化：`<BACKUP_DIR>` 默认挂载到宿主机 `./backups/`（见 `docker-compose.yml` 的 `backup` 服务 volumes）
+- 保留策略：按天归档到子目录，`BACKUP_RETENTION_DAYS` 天前的整个目录自动清理（默认 7 天）
+
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `BACKUP_CRON` | `0 2 * * *` | cron 表达式（标准 crontab 格式：分 时 日 月 周） |
+| `BACKUP_RETENTION_DAYS` | 7 | 保留天数（超过自动清理整个日期子目录） |
+| `BACKUP_DIR` | /backups | 容器内备份根目录 |
+| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASS` / `DB_NAME` | postgres / 5432 / lxdoc / - / lxdoc | 数据库连接（`DB_PASS` 需与 `POSTGRES_PASSWORD` 一致） |
+| `UPLOADS_DIR` | /app/uploads | 被打包的上传目录（与 backend 容器 uploads 挂载点对应） |
+
+### 手动备份与恢复
+
+```bash
+# 立即触发一次备份
+docker exec lxdoc-backup /usr/local/bin/backup.sh
+
+# 查看备份列表（按日期归档）
+ls -lh backups/*/
+
+# 手动恢复
+# 1. 停止 backend / onlyoffice / kkfileview（避免恢复期间写入）
+docker compose stop backend onlyoffice kkfileview
+# 2. 用 pg_restore 恢复数据库（custom 格式，需先清空目标库或用 --clean）
+gunzip -c backups/<日期>/db_<时间>.dump | docker exec -i lxdoc-postgres pg_restore -U lxdoc -d lxdoc --clean --if-exists
+# 或进入 backup 容器用 restore.sh 自动选择最新备份
+docker exec -it lxdoc-backup /usr/local/bin/restore.sh
+# 3. 恢复上传文件
+tar xzf backups/<日期>/uploads_<时间>.tar.gz -C ./
+# 4. 重启服务
+docker compose up -d
+```
+
+> 生产环境恢复前请先停服务避免写入冲突，恢复后建议核对 `documents.original_path` 与 `uploads/original/` 是否一致。`restore.sh` 交互式选择备份日期，非交互场景用 `pg_restore` 显式指定。
 
 ## 系统二进制依赖
 
@@ -394,7 +481,7 @@ docker compose -f docker-compose.dev.yml up -d
 | 服务 | 宿主机端口 | 用途 |
 |------|-----------|------|
 | postgres | 5432 | 数据库（用户/密码/db 均为 `lxdoc`） |
-| onlyoffice | 8081 | docx/odt 编辑 |
+| onlyoffice | 8082 | docx/odt 编辑（dev compose 映射 8082:80） |
 | kkfileview | 8012 | 统一预览（docx/odt/pdf 保真预览） |
 | pdf2html | 7000 | PDF 版式预览（kkFileView 不可用时回退） |
 | docling | 5001 | 文档解析（可选，不测可 `stop docling`） |
@@ -420,8 +507,8 @@ DB_NAME=lxdoc
 
 # OnlyOffice 回调本地后端：容器内通过 host.docker.internal 访问宿主机
 BACKEND_PUBLIC_URL=http://host.docker.internal:3000
-# OnlyOffice 容器地址（本地直连映射端口）
-ONLYOFFICE_URL=http://localhost:8081
+# OnlyOffice 容器地址（dev compose 映射 8082:80，本地直连）
+ONLYOFFICE_URL=http://localhost:8082
 
 # kkFileView 统一预览：本地直连映射端口（浏览器与后端均用 localhost:8012）
 KKFILEVIEW_ENABLED=true
@@ -466,7 +553,7 @@ pnpm dev          # 监听 5173，热重载
 `vite.config.ts` 已配置代理：
 
 - `/api` → `http://localhost:3000`（后端）
-- `/onlyoffice` → `http://localhost:8081`（OnlyOffice，可用 `VITE_ONLYOFFICE_PROXY` 覆盖）
+- `/onlyoffice` → `http://localhost:8082`（OnlyOffice，dev compose 映射 8082:80；可用 `VITE_ONLYOFFICE_PROXY` 覆盖）
 
 访问 http://localhost:5173，用 `admin@lxdoc.local` / `lxdoc12345` 登录。
 
@@ -496,7 +583,7 @@ pnpm dev          # 监听 5173，热重载
 
 **OnlyOffice 编辑器加载失败 / 白屏**
 - 确认 `docker compose -f docker-compose.dev.yml ps onlyoffice` 状态为 running
-- 浏览器 F12 看 `/onlyoffice/web-apps/...` 是否 200（vite 代理 8081）
+- 浏览器 F12 看 `/onlyoffice/web-apps/...` 是否 200（vite 代理 8082，dev compose 映射 8082:80）
 - 后端 `.env` 的 `BACKEND_PUBLIC_URL=http://host.docker.internal:3000`（OnlyOffice 容器回调本地后端）
 - 验证容器能否回调后端：`docker exec lxdoc-dev-onlyoffice curl -I http://host.docker.internal:3000/health`
 
@@ -522,7 +609,7 @@ pnpm dev          # 监听 5173，热重载
 - vite 代理 `/api` → 3000，无需额外配置
 
 **端口冲突**
-- 5432/8081/8012/7000/5001/3000/5173 被占用时改 `docker-compose.dev.yml` 的端口映射或停掉占用进程
+- 5432/8082/8012/7000/5001/3000/5173 被占用时改 `docker-compose.dev.yml` 的端口映射或停掉占用进程
 
 ### 仅测后端 API（不需要前端）
 

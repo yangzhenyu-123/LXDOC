@@ -1,8 +1,13 @@
 import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { LLM_PROVIDERS } from './llm-provider.interface';
 import { LlmService } from './llm.service';
 import { GlmProvider } from './providers/glm.provider';
 import { LlmController } from './llm.controller';
+import { LlmConfig } from './llm-config.entity';
+import { User } from '../users/user.entity';
+import { LlmConfigService } from './llm-config.service';
+import { LlmConfigController } from './llm-config.controller';
 
 /**
  * LLM 模块
@@ -10,6 +15,7 @@ import { LlmController } from './llm.controller';
  * - 注册 GLM Provider 到 LLM_PROVIDERS token（数组形式，便于后续扩展多 Provider）
  * - 提供 LlmService 作为业务统一入口
  * - 暴露 /api/llm/health 健康检查接口
+ * - LlmConfig 多套配置管理（admin CRUD + 用户选择）
  *
  * 业务模块如需 LLM 能力，只需 import LlmModule，再用 @OptionalLlm() 注入 LlmService：
  *   @Module({ imports: [LlmModule] })
@@ -18,7 +24,8 @@ import { LlmController } from './llm.controller';
  * LLM 未启用（LLM_ENABLED=false）时 LlmService.chat/embed 返回 null，不报错。
  */
 @Module({
-  controllers: [LlmController],
+  imports: [TypeOrmModule.forFeature([LlmConfig, User])],
+  controllers: [LlmController, LlmConfigController],
   providers: [
     GlmProvider,
     {
@@ -28,7 +35,8 @@ import { LlmController } from './llm.controller';
       inject: [GlmProvider],
     },
     LlmService,
+    LlmConfigService,
   ],
-  exports: [LlmService],
+  exports: [LlmService, LlmConfigService],
 })
 export class LlmModule {}

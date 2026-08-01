@@ -62,6 +62,40 @@ export class User {
   @Column({ name: 'organization_id', type: 'uuid', nullable: true })
   organizationId: string | null;
 
+  // 用户选择的 LLM 配置套（admin 预配置的多套 LLM 之一）；null 表示用全局默认
+  // 保留向后兼容，新逻辑改用下方用户级 LLM 字段
+  @Index()
+  @Column({ name: 'llm_config_id', type: 'uuid', nullable: true })
+  llmConfigId: string | null;
+
+  // ============ 用户级 LLM 配置（每人配自己的 baseUrl/apiKey/model） ============
+  // 普通用户必须自己配置才能使用 AI；admin 未配时回退系统配置 llm.*
+
+  /** LLM 服务端点（OpenAI 兼容），如 http://icp.rd.in.linx/v1/ */
+  @Column({ name: 'llm_base_url', type: 'varchar', length: 500, nullable: true })
+  llmBaseUrl: string | null;
+
+  /** LLM 调用密钥（内网若无需鉴权可留空）；select:false 默认查询不返回 */
+  @Column({ name: 'llm_api_key', type: 'varchar', length: 200, nullable: true, select: false })
+  llmApiKey: string | null;
+
+  /** LLM 模型名，如 zai-org/GLM-5.2-FP8 */
+  @Column({ name: 'llm_model', type: 'varchar', length: 100, nullable: true })
+  llmModel: string | null;
+
+  /** 是否启用推理模式（GLM-5.2 等推理模型可关闭以加速简单任务） */
+  @Column({ name: 'llm_enable_thinking', type: 'boolean', default: true })
+  llmEnableThinking: boolean;
+
+  /**
+   * admin 代理身份：指向另一用户的 id。
+   * 设置后 admin 调用 AI 时实际使用该用户的 LLM 配置（方便测试不同用户的配置）。
+   * 仅 admin 可设置；普通用户忽略此字段。
+   */
+  @Index()
+  @Column({ name: 'llm_act_as_user_id', type: 'uuid', nullable: true })
+  llmActAsUserId: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
 

@@ -11,10 +11,12 @@ import {
   ApiBody,
   ApiConsumes,
   ApiOperation,
+  ApiProperty,
   ApiTags,
 } from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
 import * as path from 'node:path';
+import { IsArray, IsEnum, IsOptional, IsString, IsUUID } from 'class-validator';
 import { UploadsService, ALLOWED_EXTENSIONS } from './uploads.service';
 import { UploadDocumentDto } from './dto/upload-document.dto';
 import { UploadImageDto } from './dto/upload-image.dto';
@@ -24,6 +26,35 @@ import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorat
 import { Audit } from '../common/decorators/audit.decorator';
 import { AuditAction } from '../audit/audit-log.entity';
 import { UserRole } from '../users/user.entity';
+import { DocumentOwnerType } from '../documents/document.entity';
+
+/**
+ * 创建文档集 DTO（无文件，纯引用组合）
+ */
+class CreateCollectionDto {
+  @ApiProperty({ description: '集合标题' })
+  @IsString()
+  title: string;
+
+  @ApiProperty({ description: '所属分类 id' })
+  @IsUUID()
+  categoryId: string;
+
+  @ApiProperty({ description: '成员文档 id 列表', type: [String] })
+  @IsArray()
+  @IsUUID('all', { each: true })
+  memberDocIds: string[];
+
+  @ApiProperty({ description: '文档归属类型', enum: DocumentOwnerType, default: 'personal' })
+  @IsOptional()
+  @IsEnum(DocumentOwnerType)
+  ownerType?: DocumentOwnerType;
+
+  @ApiProperty({ description: '归属组织 id（ownerType 非 personal 时必填）' })
+  @IsOptional()
+  @IsUUID()
+  ownerId?: string;
+}
 
 /**
  * 文件上传控制器
@@ -48,7 +79,7 @@ export class UploadsController {
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     description:
-      'categoryId 为分类 ID；file 为上传文件（字段名必须为 file，支持 .md/.txt/.docx/.odt/.pdf）',
+      'categoryId 为分类 ID；file 为上传文件（字段名必须为 file，支持 .md/.txt/.docx/.odt/.pdf 及 office 全格式）',
     schema: {
       type: 'object',
       properties: {
@@ -59,6 +90,7 @@ export class UploadsController {
           description: '文档归属类型（可选，默认 personal）',
         },
         ownerId: { type: 'string', format: 'uuid', description: '组织节点 ID（ownerType 非 personal 时必填）' },
+        isCollection: { type: 'boolean', description: '是否标记为文档集（默认 false）' },
         file: { type: 'string', format: 'binary', description: '上传文件' },
       },
       required: ['categoryId', 'file'],
@@ -92,6 +124,7 @@ export class UploadsController {
       user,
       dto.ownerType,
       dto.ownerId,
+      dto.isCollection,
     );
     return {
       id: doc.id,
@@ -101,6 +134,43 @@ export class UploadsController {
       categoryId: doc.categoryId,
       ownerType: doc.ownerType,
       ownerId: doc.ownerId,
+      isCollection: doc.isCollection,
+    };
+  }
+
+  /**
+   * POST /api/uploads/collection
+   * 创建文档集（无文件，主文档 isCollection=true，引用成员文档）
+   * body: { title, categoryId, memberDocIds[], ownerType?, ownerId? }
+   */
+  @ApiOperation({ summary: '创建文档集（无文件，引用成员文档）' })
+  @ApiBody({ type: CreateCollectionDto })
+  @Post('collection')
+  @Audit(AuditAction.DOCUMENT_CREATE, 'document')
+  async createCollection(
+    @Body() dto: CreateCollectionDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    if (!dto.memberDocIds?.length) {
+      throw new BadRequestException('至少需要一个成员文档');
+    }
+    const doc = await this.service.createCollection(
+      dto.title,
+      dto.categoryId,
+      dto.memberDocIds,
+      user,
+      dto.ownerType,
+      dto.ownerId,
+    );
+    return {
+      id: doc.id,
+      title: doc.title,
+      format: doc.format,
+      version: doc.version,
+      categoryId: doc.categoryId,
+      ownerType: doc.ownerType,
+      ownerId: doc.ownerId,
+      isCollection: doc.isCollection,
     };
   }
 

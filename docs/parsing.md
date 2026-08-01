@@ -2,12 +2,13 @@
 
 LXDOC 上传文档后的解析、图片存储、文本入库与 AI 总结投喂的完整设计。
 
-## 存储分层（三段式）
+## 存储分层（四段式）
 
 ```
 uploads/
-├── original/<docId>/<docId>-<原文件名>   # 原文件（溯源/重解析/OnlyOffice 编辑）
-├── images/<docId>/<图片名>               # 解析提取的图片（docx/odt/pdf）
+├── original/<docId>/<原文件名>           # 原文件（溯源/重解析/OnlyOffice 编辑）
+├── images/<docId>/<图片名>               # 解析提取的图片（docx/odt/pdf/docling）
+├── attachments/<docId>/<附件文件名>       # 附件文件（file 类型附件落盘）
 └── cache/<docId>/                        # 转换中间产物（用后即删）
 ```
 
@@ -35,27 +36,50 @@ content 中图片存为 `![alt](/api/files/<docId>/image/<name>)`，不带 token
 ### 双层解析：docling 为主 + 本地回退
 
 ```
-                ┌─ md/txt ──────────────────────► TextParser（Node fs）
+                ┌─ md/txt/csv/tsv ──────────────► TextParser（Node fs，直读 utf-8）
 上传文件 ──► ingest ──┤
                 └─ docx/odt/pdf ──► DOCLING_ENABLED?
                                       ├─ 是 ──► DoclingParser（HTTP /v1/convert/file）
                                       │            └─ 失败自动 catch 回退 ▼
                                       └─ 否 ──────────────────────────────► PandocParser / PdfParser
+
+                ┌─ cell/slide/不可解析 Office ──► 仅落盘原文件，content=null（kkFileView 预览）
+                └─ 附件（130+ 种）──────────────► 落盘 attachments/<docId>/，不解析
 ```
 
-- **md/txt**：始终走 `TextParser`（纯文本，无需重型解析）
+- **md/txt/csv/tsv**：始终走 `TextParser`（纯文本，无需重型解析；csv/tsv 不送 docling，避免被转 markdown 表格破坏原始内容）
 - **docx/odt/pdf**：`DOCLING_ENABLED=true` 时优先走 `DoclingParser`，失败回退 `PandocParser`（docx/odt）或 `PdfParser`（pdf）
+- **cell/slide/不可解析 Office**：仅落盘原文件，`content=null`，靠 OnlyOffice 编辑/kkFileView 预览，全文检索只走标题与标签
+- **附件**：落盘 `attachments/<docId>/`，不解析，仅 kkFileView 预览
 - 回退仅记录 warn 日志，对用户透明（上传不中断）
 
 ### 各解析器能力对比
 
 | 格式 | 本地解析器 | 能力 | docling 能力 |
 |------|-----------|------|-------------|
-| md/txt | TextParser | 纯文本 | 不走 docling |
+| md/txt/csv/tsv | TextParser | 纯文本 | 不走 docling |
 | docx/odt | PandocParser | markdown + 图片（`--extract-media`），表格丢结构 | markdown + 图片 + 表格结构 |
 | pdf | PdfParser（pdf-parse） | 纯文本，**无图、无版式、无表格** | markdown + 图片 + 表格 + 版式 + OCR |
+| cell/slide/其他 Office | 无 | 不解析 | 不解析 |
+| 附件 | 无 | 不解析 | 不解析 |
 
 docling 的核心价值：**补齐 PDF 图片/表格**，并统一 docx/odt 的表格结构还原。
+
+## OnlyOffice 保存后的索引刷新
+
+OnlyOffice 真编辑保存时不更新 `documents.content`（content 是 pandoc 索引文本，不可作编辑正文），但需要刷新全文检索索引。`OnlyOfficeService` 在保存回调成功后异步调用 `refreshIndexText`：
+
+```
+OnlyOffice POST /callback (status=2/6)
+  → 下载 payload.url 覆盖 originalPath
+  → version+1, content_source='onlyoffice'
+  → 异步 refreshIndexText(docId, format):
+      ├─ md/txt/csv/tsv               → 直接读 utf-8 入 content
+      ├─ word 类（doc/docx/dot/odt/rtf/wps/wpt/ofd 等）→ pandoc -t plain 入 content
+      └─ cell/slide/pdf               → 跳过（best-effort，标题/标签仍可检索）
+```
+
+设计意图：保持 `documents.content` 始终是「可检索的纯文本/markdown」语义，编辑器正文与索引正文解耦。
 
 ## docling-serve 集成
 

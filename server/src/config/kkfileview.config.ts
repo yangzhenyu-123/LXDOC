@@ -12,9 +12,12 @@
  * 预览接入：后端 GET /api/documents/:id/kkview 返回拼好的 kkFileView 预览 URL
  *   （文件下载 URL 走 /api/files/:docId/original?token=，base64 编码后作为 ?url= 参数）
  */
+import { getOverrideBool } from '../system/settings-overrides';
+
 export const kkfileviewConfig = {
-  enabled:
-    (process.env.KKFILEVIEW_ENABLED ?? 'true').toLowerCase() === 'true',
+  get enabled(): boolean {
+    return getOverrideBool('kkfileview.enabled', (process.env.KKFILEVIEW_ENABLED ?? 'true').toLowerCase() === 'true');
+  },
   internalUrl:
     process.env.KKFILEVIEW_URL ?? 'http://kkfileview:8012',
   publicUrl:

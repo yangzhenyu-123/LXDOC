@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import MarkdownEditor from '@/components/MarkdownEditor.vue';
@@ -7,7 +7,6 @@ import PdfViewer from '@/components/PdfViewer.vue';
 import OnlyOfficeEditor from '@/components/OnlyOfficeEditor.vue';
 import {
   getDocument,
-  getPreviewHtml,
   getPdfHtml,
   getKkViewUrl,
   convertToEditable,
@@ -15,9 +14,17 @@ import {
   listVersions,
   rollback as rollbackApi,
   updateDocument,
+  toggleFavorite as toggleFavoriteApi,
   type Document,
   type DocumentVersion,
 } from '@/api/documents';
+import {
+  listAttachments,
+  uploadAttachmentFile,
+  deleteAttachment,
+  getAttachmentKkViewUrl,
+  type DocumentAttachment,
+} from '@/api/attachments';
 import {
   getFileToken,
   buildOriginalUrl,
@@ -25,6 +32,7 @@ import {
 } from '@/api/files';
 import { useAuthStore } from '@/stores/auth';
 import { sanitizeHtml } from '@/utils/sanitize';
+import { ATTACH_ACCEPT, isOnlyOfficeEditable } from '@/config/formats';
 
 const route = useRoute();
 const router = useRouter();
@@ -33,6 +41,9 @@ const docId = computed(() => String(route.params.docId ?? ''));
 
 // 文档实体
 const doc = ref<Document | null>(null);
+// 收藏状态（从 doc.favorited 同步）
+const favorited = ref(false);
+const favoriteLoading = ref(false);
 // 文件访问签名 token（加载文档时获取，供 PDF 原文件 / 编辑器图片加载使用）
 const fileToken = ref('');
 // 版本列表
@@ -62,21 +73,20 @@ const savedSnapshot = ref<{ title: string; content: string; tags: string[] }>({
   tags: [],
 });
 
-// 是否为可编辑文档格式（md/txt/docx/odt/pdf，PDF 全文入库后亦可编辑文本）
-// docx/odt 走 OnlyOffice，无需"保存"按钮（OnlyOffice 自行保存）
+// 是否为可编辑文档格式（md/txt）
+// docx/odt 走 OnlyOffice 编辑，无需"保存"按钮（OnlyOffice 自行保存）
+// PDF 不提供前端编辑，其文本由 docling 在后端解析入库，仅供 LLM 搜索/总结
 const isEditable = computed(() => {
   const f = doc.value?.format;
-  return f === 'md' || f === 'txt' || f === 'pdf';
+  return f === 'md' || f === 'txt';
 });
 
 // 是否为 PDF 格式
 const isPdf = computed(() => doc.value?.format === 'pdf');
 
-// 是否为 docx/odt（走 OnlyOffice 编辑/查看）
-const isDocLike = computed(() => {
-  const f = doc.value?.format;
-  return f === 'docx' || f === 'odt';
-});
+// 是否为 OnlyOffice 可编辑格式（word/cell/slide 全格式）
+// 走 OnlyOffice 编辑/预览切换；md/txt 仍走 MarkdownEditor（Vditor 体验更好）
+const isDocLike = computed(() => isOnlyOfficeEditable(doc.value?.format));
 
 // OnlyOffice 模式：有写权限用 edit，否则 view
 const onlyofficeMode = computed<'edit' | 'view'>(() =>
@@ -90,8 +100,9 @@ const pdfUrl = computed(() =>
     : '',
 );
 
-// PDF 三 tab：版式预览（kkFileView iframe） / 翻页预览（pdfjs） / 编辑文本（Vditor）
-const pdfTab = ref<'layout' | 'pages' | 'text'>('layout');
+// PDF 两 tab：版式预览（kkFileView iframe） / 翻页预览（pdfjs）
+// PDF 不提供"编辑文本"，文本由 docling 在后端解析入库供 LLM 使用
+const pdfTab = ref<'layout' | 'pages'>('layout');
 // kkFileView 预览 URL（iframe src）；为空且无错误时表示未加载/未启用
 const kkviewUrl = ref('');
 const kkviewLoading = ref(false);
@@ -106,12 +117,49 @@ const summarizeLoading = ref(false);
 // 当前文档是否本身是 AI 总结文档（用于显示"查看总结/阅读"入口）
 const isAiSummary = computed(() => doc.value?.contentSource === 'ai_summary');
 
-// docx/odt 模式切换：edit（编辑） / preview（原版预览）
+// docx/odt 模式切换：edit（编辑） / preview（预览）
 const docMode = ref<'edit' | 'preview'>('edit');
-// 原版预览 HTML
-const previewHtml = ref('');
-const previewLoading = ref(false);
-const previewError = ref<string | null>(null);
+
+// 两级全屏：
+// 0 = 正常（侧栏 + 主区）
+// 1 = 专注模式（隐藏侧栏，主区占满）
+// 2 = 浏览器全屏（在 1 基础上调 Fullscreen API 占满屏幕）
+const fullscreenLevel = ref<0 | 1 | 2>(0);
+// 文档视图根元素引用，用于调用 requestFullscreen
+const docViewRoot = ref<HTMLElement | null>(null);
+
+async function toggleFullscreen() {
+  const next = ((fullscreenLevel.value + 1) % 3) as 0 | 1 | 2;
+  // 从浏览器全屏退出时，先退出 Fullscreen API
+  if (fullscreenLevel.value === 2 && document.fullscreenElement) {
+    await document.exitFullscreen().catch(() => {});
+  }
+  // 进入浏览器全屏（level 2）
+  if (next === 2) {
+    try {
+      await docViewRoot.value?.requestFullscreen();
+      fullscreenLevel.value = 2;
+    } catch {
+      // 浏览器不支持或被拒绝，停留在专注模式
+      fullscreenLevel.value = 1;
+    }
+  } else {
+    fullscreenLevel.value = next;
+  }
+}
+
+// 监听浏览器全屏状态变化（ESC 键退出全屏时同步级别）
+function onFullscreenChange() {
+  if (!document.fullscreenElement && fullscreenLevel.value === 2) {
+    fullscreenLevel.value = 0;
+  }
+}
+
+const fullscreenLabel = computed(() => {
+  if (fullscreenLevel.value === 2) return '退出全屏';
+  if (fullscreenLevel.value === 1) return '浏览器全屏';
+  return '专注模式';
+});
 
 // 检测是否有未保存变更
 function checkDirty(): boolean {
@@ -153,6 +201,7 @@ async function loadDocument() {
   try {
     const data = await getDocument(docId.value);
     doc.value = data;
+    favorited.value = !!data.favorited;
     titleInput.value = data.title ?? '';
     contentInput.value = data.content ?? '';
     tagsInput.value = Array.isArray(data.tags) ? [...data.tags] : [];
@@ -162,10 +211,8 @@ async function loadDocument() {
       tags: Array.isArray(data.tags) ? [...data.tags] : [],
     };
     selectedVersion.value = data.version;
-    // 重置 docx/odt 预览状态
+    // 重置 docx/odt 模式状态
     docMode.value = 'edit';
-    previewHtml.value = '';
-    previewError.value = null;
     // 重置 PDF tab 状态
     pdfTab.value = 'layout';
     kkviewUrl.value = '';
@@ -173,6 +220,13 @@ async function loadDocument() {
     // 获取文件访问 token（PDF 原文件 / 编辑器图片加载需要）
     fileToken.value = await getFileToken(docId.value);
     await loadVersions();
+    // 加载附件列表（含集合共享附件聚合）
+    await loadAttachments();
+    // PDF：首次加载即预载 kkFileView 版式预览 URL
+    // watch(pdfTab) 无 immediate，初始值 'layout' 不触发，首屏会空白
+    if (isPdf.value) {
+      loadKkViewUrl();
+    }
   } catch (err: any) {
     const msg =
       err?.response?.data?.message ?? err?.message ?? '加载文档失败';
@@ -356,25 +410,6 @@ async function onSummarize() {
 }
 
 /**
- * 加载 docx/odt 原版预览 HTML
- */
-async function loadPreviewHtml() {
-  if (!docId.value) return;
-  previewLoading.value = true;
-  previewError.value = null;
-  try {
-    previewHtml.value = await getPreviewHtml(docId.value);
-  } catch (err: any) {
-    const msg =
-      err?.response?.data?.message ?? err?.message ?? '加载预览失败';
-    previewError.value = msg;
-    previewHtml.value = '';
-  } finally {
-    previewLoading.value = false;
-  }
-}
-
-/**
  * OnlyOffice 保存回调成功后：刷新文档元信息 + 版本下拉
  * 后端已 version+1 并写快照，前端只需重新拉取展示
  */
@@ -389,10 +424,28 @@ async function onOnlyOfficeSaved() {
   }
 }
 
-// docx/odt 模式切换：进入预览模式时拉取 HTML
+/**
+ * 切换收藏状态（星标/取消星标）
+ */
+async function onToggleFavorite() {
+  if (!doc.value) return;
+  favoriteLoading.value = true;
+  try {
+    const next = await toggleFavoriteApi(docId.value);
+    favorited.value = next;
+    ElMessage.success(next ? '已收藏' : '已取消收藏');
+  } catch (err: any) {
+    const msg = err?.response?.data?.message ?? err?.message ?? '操作失败';
+    ElMessage.error(msg);
+  } finally {
+    favoriteLoading.value = false;
+  }
+}
+
+// docx/odt 模式切换：进入预览模式时懒加载 kkFileView URL（复用 PDF 的加载器）
 watch(docMode, (mode) => {
-  if (mode === 'preview' && !previewHtml.value && !previewError.value) {
-    loadPreviewHtml();
+  if (mode === 'preview' && !kkviewUrl.value && !kkviewError.value) {
+    loadKkViewUrl();
   }
 });
 
@@ -462,18 +515,161 @@ function goBack() {
   router.back();
 }
 
+// ============ 附件管理 ============
+// 附件列表（含集合共享附件聚合）
+const attachments = ref<DocumentAttachment[]>([]);
+const attachUploading = ref(false);
+const attachLoading = ref(false);
+// 附件预览抽屉
+const attachPreviewVisible = ref(false);
+const attachPreviewUrl = ref('');
+const attachPreviewLoading = ref(false);
+
+// 当前文档是否为集合主文档
+const isCollection = computed(() => !!doc.value?.isCollection);
+// 集合成员附件（attachType=document）
+const collectionMembers = computed(() =>
+  attachments.value.filter((a) => a.attachType === 'document'),
+);
+// 文件附件（attachType=file）
+const fileAttachments = computed(() =>
+  attachments.value.filter((a) => a.attachType === 'file'),
+);
+// 是否可管理附件（写权限）
+const canManageAttachments = computed(() => authStore.canWrite);
+
+/**
+ * 加载附件列表
+ */
+async function loadAttachments() {
+  if (!docId.value) return;
+  attachLoading.value = true;
+  try {
+    attachments.value = await listAttachments(docId.value);
+  } catch {
+    attachments.value = [];
+  } finally {
+    attachLoading.value = false;
+  }
+}
+
+/**
+ * 上传附件文件
+ */
+async function onUploadAttachment(file: File) {
+  if (!docId.value || !file) return;
+  attachUploading.value = true;
+  try {
+    await uploadAttachmentFile(docId.value, file, fileAttachments.value.length + 1);
+    ElMessage.success('附件上传成功');
+    await loadAttachments();
+  } catch (err: any) {
+    const msg =
+      err?.response?.data?.message ?? err?.message ?? '附件上传失败';
+    ElMessage.error(`附件上传失败：${msg}`);
+  } finally {
+    attachUploading.value = false;
+  }
+}
+
+/**
+ * 删除附件 / 移出集合
+ */
+async function removeAttachment(a: DocumentAttachment) {
+  if (!docId.value) return;
+  const tip =
+    a.attachType === 'document'
+      ? `确定把「${a.name}」移出文档集？被引用文档本身不会被删除。`
+      : `确定删除附件「${a.name}」？文件将同时从磁盘移除。`;
+  try {
+    await ElMessageBox.confirm(tip, '确认', {
+      type: 'warning',
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+    });
+  } catch {
+    return; // 用户取消
+  }
+  try {
+    await deleteAttachment(docId.value, a.id);
+    ElMessage.success(a.attachType === 'document' ? '已移出集合' : '附件已删除');
+    await loadAttachments();
+  } catch (err: any) {
+    const msg =
+      err?.response?.data?.message ?? err?.message ?? '操作失败';
+    ElMessage.error(`操作失败：${msg}`);
+  }
+}
+
+/**
+ * 预览附件（kkFileView iframe）
+ */
+async function previewAttachment(a: DocumentAttachment) {
+  if (!docId.value) return;
+  if (a.attachType === 'document') {
+    // 集合成员：跳转到该文档
+    if (a.linkedDocumentId) {
+      router.push(`/document/${a.linkedDocumentId}`);
+    }
+    return;
+  }
+  attachPreviewLoading.value = true;
+  attachPreviewVisible.value = true;
+  attachPreviewUrl.value = '';
+  try {
+    const { url } = await getAttachmentKkViewUrl(docId.value, a.id);
+    attachPreviewUrl.value = url;
+  } catch (err: any) {
+    const msg =
+      err?.response?.data?.message ?? err?.message ?? '预览加载失败';
+    ElMessage.error(`附件预览失败：${msg}`);
+    attachPreviewVisible.value = false;
+  } finally {
+    attachPreviewLoading.value = false;
+  }
+}
+
+/**
+ * 格式化文件大小
+ */
+function formatSize(bytes: number | null): string {
+  if (!bytes) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 onMounted(() => {
   loadDocument();
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+});
+
+onUnmounted(() => {
+  document.removeEventListener('fullscreenchange', onFullscreenChange);
 });
 </script>
 
 <template>
-  <div class="document-view">
+  <div class="document-view" :class="{ 'fs-focus': fullscreenLevel >= 1 }" ref="docViewRoot">
     <!-- 顶部工具栏 -->
     <div class="toolbar">
       <el-button @click="goBack">
         <el-icon class="el-icon--left"><ArrowLeft /></el-icon>
         返回
+      </el-button>
+      <!-- 收藏/取消收藏 -->
+      <el-button
+        :loading="favoriteLoading"
+        :type="favorited ? 'warning' : 'default'"
+        :plain="favorited"
+        @click="onToggleFavorite"
+        :title="favorited ? '取消收藏' : '收藏'"
+      >
+        <el-icon class="el-icon--left">
+          <StarFilled v-if="favorited" />
+          <Star v-else />
+        </el-icon>
+        {{ favorited ? '已收藏' : '收藏' }}
       </el-button>
       <el-input
         v-model="titleInput"
@@ -532,6 +728,20 @@ onMounted(() => {
       >
         回滚到此版本
       </el-button>
+      <!-- 两级全屏：1=专注模式（隐藏侧栏），2=浏览器原生全屏 -->
+      <el-button
+        class="fs-btn"
+        :type="fullscreenLevel > 0 ? 'primary' : 'default'"
+        @click="toggleFullscreen"
+        :title="fullscreenLabel"
+      >
+        <el-icon class="el-icon--left">
+          <FullScreen v-if="fullscreenLevel === 0" />
+          <Expand v-else-if="fullscreenLevel === 1" />
+          <Close v-else />
+        </el-icon>
+        {{ fullscreenLabel }}
+      </el-button>
     </div>
 
     <!-- 主体区：loading / error / 内容 -->
@@ -548,12 +758,11 @@ onMounted(() => {
       <div v-else-if="doc" class="content-wrapper">
         <!-- 左侧主区 -->
         <div class="main">
-          <!-- PDF：版式预览 / 翻页预览 / 编辑文本 三 tab -->
+          <!-- PDF：版式预览 / 翻页预览 两 tab（文本由 docling 后端解析入库供 LLM） -->
           <template v-if="isPdf">
             <el-radio-group v-model="pdfTab" class="doc-mode-switch">
               <el-radio-button value="layout">版式预览</el-radio-button>
               <el-radio-button value="pages">翻页预览</el-radio-button>
-              <el-radio-button value="text">编辑文本</el-radio-button>
             </el-radio-group>
             <!-- 版式预览：优先 kkFileView iframe；未启用时回退 pdf2htmlEX HTML -->
             <div
@@ -586,20 +795,12 @@ onMounted(() => {
               v-else-if="pdfTab === 'pages'"
               :src="pdfUrl"
             />
-            <!-- 编辑文本：编辑 pdf-parse 提取的全文 -->
-            <MarkdownEditor
-              v-else
-              v-model="contentInput"
-              :doc-id="docId"
-              :file-token="fileToken"
-              @save="save"
-            />
           </template>
-          <!-- docx/odt：OnlyOffice 真编辑 / pandoc 原版预览 切换 -->
+          <!-- docx/odt：OnlyOffice 编辑 / kkFileView 预览 切换 -->
           <template v-else-if="isDocLike">
             <el-radio-group v-model="docMode" class="doc-mode-switch">
               <el-radio-button value="edit">{{ onlyofficeMode === 'edit' ? '编辑' : '查看' }}</el-radio-button>
-              <el-radio-button value="preview">原版预览</el-radio-button>
+              <el-radio-button value="preview">预览</el-radio-button>
             </el-radio-group>
             <OnlyOfficeEditor
               v-if="docMode === 'edit'"
@@ -607,18 +808,20 @@ onMounted(() => {
               :mode="onlyofficeMode"
               @saved="onOnlyOfficeSaved"
             />
-            <div v-else class="preview-wrap" v-loading="previewLoading">
+            <div v-else class="preview-wrap" v-loading="kkviewLoading">
               <el-alert
-                v-if="previewError"
-                :title="previewError"
+                v-if="kkviewError"
+                :title="kkviewError"
                 type="error"
                 show-icon
                 :closable="false"
               />
-              <div
-                v-else
-                class="preview-html"
-                v-html="sanitizeHtml(previewHtml)"
+              <iframe
+                v-else-if="kkviewUrl"
+                :src="kkviewUrl"
+                class="kkview-iframe"
+                frameborder="0"
+                allowfullscreen
               />
             </div>
           </template>
@@ -633,8 +836,8 @@ onMounted(() => {
           <el-empty v-else :description="`暂不支持的格式：${doc.format}`" />
         </div>
 
-        <!-- 右侧侧栏 -->
-        <el-aside width="280px" class="sidebar">
+        <!-- 右侧侧栏（专注模式/浏览器全屏时隐藏） -->
+        <el-aside v-show="fullscreenLevel === 0" width="280px" class="sidebar">
           <!-- 元信息卡片 -->
           <el-card class="meta-card" shadow="never">
             <template #header>
@@ -712,9 +915,100 @@ onMounted(() => {
               回滚到此版本
             </el-button>
           </el-card>
+
+          <!-- 文档集成员（仅集合主文档显示） -->
+          <el-card v-if="isCollection" class="meta-card" shadow="never">
+            <template #header>
+              <span class="card-title">文档集成员（{{ collectionMembers.length }}）</span>
+            </template>
+            <div v-if="attachLoading" class="attach-empty">加载中...</div>
+            <div v-else-if="!collectionMembers.length" class="attach-empty">
+              暂无成员文档
+            </div>
+            <ul v-else class="member-list">
+              <li v-for="m in collectionMembers" :key="m.id" class="member-item">
+                <el-link
+                  type="primary"
+                  :underline="false"
+                  @click="m.linkedDocumentId && router.push(`/document/${m.linkedDocumentId}`)"
+                >
+                  {{ m.name }}
+                </el-link>
+                <el-button
+                  v-if="canManageAttachments"
+                  link
+                  size="small"
+                  type="danger"
+                  @click="removeAttachment(m)"
+                >
+                  移出
+                </el-button>
+              </li>
+            </ul>
+          </el-card>
+
+          <!-- 附件文件 -->
+          <el-card class="meta-card" shadow="never">
+            <template #header>
+              <span class="card-title">附件（{{ fileAttachments.length }}）</span>
+            </template>
+            <!-- 上传附件按钮（写权限） -->
+            <el-upload
+              v-if="canManageAttachments"
+              :show-file-list="false"
+              :auto-upload="true"
+              :before-upload="onUploadAttachment"
+              :disabled="attachUploading"
+              :accept="ATTACH_ACCEPT"
+              class="attach-upload"
+            >
+              <el-button :loading="attachUploading" size="small" class="attach-add-btn">
+                + 添加附件
+              </el-button>
+            </el-upload>
+            <div v-if="attachLoading" class="attach-empty">加载中...</div>
+            <div v-else-if="!fileAttachments.length" class="attach-empty">
+              暂无附件
+            </div>
+            <ul v-else class="attach-list">
+              <li v-for="a in fileAttachments" :key="a.id" class="attach-item">
+                <div class="attach-info" @click="previewAttachment(a)">
+                  <span class="attach-name" :title="a.name">{{ a.name }}</span>
+                  <span class="attach-size">{{ formatSize(a.fileSize) }}</span>
+                </div>
+                <el-button
+                  v-if="canManageAttachments"
+                  link
+                  size="small"
+                  type="danger"
+                  @click="removeAttachment(a)"
+                >
+                  删除
+                </el-button>
+              </li>
+            </ul>
+          </el-card>
         </el-aside>
       </div>
     </div>
+
+    <!-- 附件预览抽屉（kkFileView iframe） -->
+    <el-drawer
+      v-model="attachPreviewVisible"
+      title="附件预览"
+      size="80%"
+      direction="rtl"
+      :destroy-on-close="true"
+    >
+      <div v-if="attachPreviewLoading" class="preview-loading">加载中...</div>
+      <iframe
+        v-else-if="attachPreviewUrl"
+        :src="attachPreviewUrl"
+        class="preview-iframe"
+        frameborder="0"
+        allowfullscreen
+      />
+    </el-drawer>
   </div>
 </template>
 
@@ -821,6 +1115,11 @@ onMounted(() => {
 .meta-card {
   border: 1px solid #e4e7ed;
   border-radius: 4px;
+  /* 不被 flex 容器压缩，内容自然撑开，避免卡片内部出现滚动条 */
+  flex-shrink: 0;
+}
+.meta-card :deep(.el-card__body) {
+  overflow: visible;
 }
 .card-title {
   font-weight: 600;
@@ -868,5 +1167,97 @@ onMounted(() => {
 }
 .rollback-btn {
   width: 100%;
+}
+.fs-btn {
+  margin-left: auto;
+}
+/* 专注模式/浏览器全屏：收紧 body padding，主区更宽敞 */
+.document-view.fs-focus .body {
+  padding: 8px;
+}
+.attach-upload {
+  margin-bottom: 8px;
+}
+/* 添加附件按钮：渐变红色主题，白字始终清晰，避免 plain 样式文字过淡 */
+.attach-add-btn {
+  background: var(--lx-gradient-danger);
+  border: none;
+  color: var(--lx-text-inverse);
+  font-weight: var(--lx-font-medium);
+  box-shadow: 0 2px 6px rgba(239, 68, 68, 0.3);
+  transition: background var(--lx-transition), box-shadow var(--lx-transition);
+}
+.attach-add-btn:hover,
+.attach-add-btn:focus {
+  background: var(--lx-gradient-danger-hover);
+  color: var(--lx-text-inverse);
+  border: none;
+  box-shadow: 0 4px 10px rgba(239, 68, 68, 0.4);
+}
+.attach-add-btn:active {
+  background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%);
+  color: var(--lx-text-inverse);
+}
+.attach-add-btn.is-disabled,
+.attach-add-btn.is-loading {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.attach-empty {
+  color: #c0c4cc;
+  font-size: 12px;
+  text-align: center;
+  padding: 8px 0;
+}
+.attach-list,
+.member-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.attach-item,
+.member-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px dashed #ebeef5;
+}
+.attach-item:last-child,
+.member-item:last-child {
+  border-bottom: none;
+}
+.attach-info {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.attach-info:hover .attach-name {
+  color: var(--lx-primary-600, #4f46e5);
+}
+.attach-name {
+  font-size: 13px;
+  color: #303133;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.attach-size {
+  font-size: 11px;
+  color: #c0c4cc;
+}
+.preview-loading {
+  text-align: center;
+  padding: 40px;
+  color: #909399;
+}
+.preview-iframe {
+  width: 100%;
+  height: calc(100vh - 100px);
+  border: none;
 }
 </style>

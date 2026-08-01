@@ -40,6 +40,11 @@ function initVditor() {
     // 即时渲染模式
     mode: 'ir',
     height: '70vh',
+    // Vditor 默认从 unpkg.com CDN 加载 i18n/emoji 等资源，内网无法访问外网；
+    // 改为本地路径 /vditor（构建时将 node_modules/vditor/dist 复制到 public/vditor），
+    // Vditor 会从 <cdn>/dist/... 加载资源，故 cdn 设为 /vditor
+    cdn: '/vditor',
+    lang: 'zh_CN',
     toolbar: [
       'headings', 'bold', 'italic', '|',
       'link', 'list', 'ordered-list', 'check', 'quote', 'line', '|',

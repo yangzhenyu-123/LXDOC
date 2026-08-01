@@ -1,0 +1,39 @@
+# LXDOC 项目根 .dockerignore
+# 构建上下文为项目根目录（docker-compose.yml 的 context: .），
+# 需排除不必要或权限受限的目录，避免构建扫描失败或上下文过大。
+
+# 上传文件目录（运行时数据，不应进入构建上下文；权限可能为容器内 node 用户，宿主机无法 stat）
+uploads/
+
+# 备份目录（运行时数据，由 backup 容器以 root 创建，宿主机无法 stat）
+backups/
+
+# Git 仓库
+.git/
+.gitignore
+
+# 本地依赖与构建产物
+server/node_modules/
+web/node_modules/
+server/dist/
+web/dist/
+
+# 环境配置（敏感信息，不应进入镜像）
+.env
+.env.*
+server/.env
+server/.env.*
+
+# IDE 与文档
+.vscode/
+.idea/
+docs/
+
+# Docker 自身文件（避免递归）
+docker-compose*.yml
+Dockerfile*
+
+# 临时文件
+*.log
+*.tmp
+/tmp/

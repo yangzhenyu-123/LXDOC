@@ -30,6 +30,12 @@ export interface Document {
   contentSource?: ContentSource;
   // 源文档 id（仅 AI 总结文档有值）：指向被总结的原文档，阅读页据此提供"查看原文"入口
   sourceDocId?: string | null;
+  // 知识库路径（仅 AI 总结文档）：LLM 生成的分类路径
+  knowledgePath?: string | null;
+  // 是否为文档集主文档（集合 = 文件夹，成员通过附件引用）
+  isCollection?: boolean;
+  // 当前用户是否已收藏（仅 findOne 接口返回）
+  favorited?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -58,6 +64,14 @@ export interface DocumentListItem {
   updatedAt: string;
   // 创建者用户 id，用于前端判断 editor 是否可删
   createdBy: string | null;
+  // 创建者用户名（联表查询返回，供列表展示）
+  createdByName?: string | null;
+  ownerType?: string;
+  ownerId?: string | null;
+  // 是否为文档集主文档
+  isCollection?: boolean;
+  // 当前用户是否已收藏
+  favorited?: boolean;
 }
 
 // 更新文档请求体
@@ -254,5 +268,57 @@ export function getRecentDocuments(
   return client.get<DocumentListItem[], DocumentListItem[]>(
     '/documents/recent',
     { params: { limit } },
+  );
+}
+
+/**
+ * 切换文档收藏状态（星标/取消星标）
+ * POST /documents/:id/favorite
+ * 返回 { favorited: boolean }
+ */
+export async function toggleFavorite(
+  id: string,
+): Promise<boolean> {
+  const res = await client.post<{ favorited: boolean }, { favorited: boolean }>(
+    `/documents/${id}/favorite`,
+  );
+  return res?.favorited ?? false;
+}
+
+/**
+ * 获取我创建的文档
+ * GET /documents/my
+ */
+export function getMyDocuments(): Promise<DocumentListItem[]> {
+  return client.get<DocumentListItem[], DocumentListItem[]>('/documents/my');
+}
+
+/**
+ * 获取我收藏的文档
+ * GET /documents/favorites
+ */
+export function getFavorites(): Promise<DocumentListItem[]> {
+  return client.get<DocumentListItem[], DocumentListItem[]>(
+    '/documents/favorites',
+  );
+}
+
+/**
+ * 获取我所在组的文档（按组织架构）
+ * GET /documents/my-org
+ */
+export function getMyOrgDocuments(): Promise<DocumentListItem[]> {
+  return client.get<DocumentListItem[], DocumentListItem[]>(
+    '/documents/my-org',
+  );
+}
+
+/**
+ * 获取标签聚合（标签云）
+ * GET /documents/tags
+ */
+export function getTags(): Promise<{ tag: string; count: number }[]> {
+  return client.get<{ tag: string; count: number }[], { tag: string; count: number }[]>(
+    '/documents/tags',
   );
 }

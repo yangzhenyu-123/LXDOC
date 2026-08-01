@@ -1,0 +1,130 @@
+/**
+ * LXDOC 设计令牌
+ * 统一的色板/圆角/阴影/间距/字号 CSS 变量
+ *
+ * 设计理念：深蓝系现代化（slate-900 顶栏 + indigo 主色点缀）
+ * 改主题色只需修改此处，全站自动跟随
+ */
+
+:root {
+  /* ============ 品牌主色 (Indigo) ============ */
+  --lx-primary: #6366f1;          /* indigo-500 主色 */
+  --lx-primary-600: #4f46e5;      /* indigo-600 悬停 */
+  --lx-primary-700: #4338ca;      /* indigo-700 激活 */
+  --lx-primary-400: #818cf8;      /* indigo-400 浅 */
+  --lx-primary-100: #e0e7ff;      /* indigo-100 背景点缀 */
+  --lx-primary-50: #eef2ff;       /* indigo-50 背景柔和 */
+
+  /* ============ 辅助色 (Violet，用于渐变第二色) ============ */
+  --lx-accent: #8b5cf6;           /* violet-500 */
+  --lx-accent-400: #a78bfa;       /* violet-400 */
+
+  /* ============ 中性色 (Slate) ============ */
+  --lx-bg: #f8fafc;               /* slate-50 主区背景 */
+  --lx-bg-elevated: #ffffff;      /* 卡片/导航白底 */
+  --lx-bg-subtle: #f1f5f9;        /* slate-100 次级背景 */
+  --lx-bg-muted: #f5f7fa;         /* 兼容旧值 */
+
+  --lx-border: #e2e8f0;           /* slate-200 默认边框 */
+  --lx-border-light: #f1f5f9;     /* slate-100 浅边框 */
+  --lx-border-strong: #cbd5e1;    /* slate-300 强边框 */
+
+  --lx-text: #0f172a;             /* slate-900 主文字 */
+  --lx-text-regular: #334155;     /* slate-700 常规文字 */
+  --lx-text-secondary: #64748b;  /* slate-500 次要文字 */
+  --lx-text-placeholder: #94a3b8;/* slate-400 占位 */
+  --lx-text-disabled: #cbd5e1;    /* slate-300 禁用 */
+  --lx-text-inverse: #ffffff;     /* 深底白字 */
+
+  /* ============ 顶栏深色 (Slate 深色) ============ */
+  --lx-header-bg: linear-gradient(90deg, #0f172a 0%, #1e293b 100%);
+  --lx-header-text: rgba(255, 255, 255, 0.92);
+  --lx-header-text-muted: rgba(255, 255, 255, 0.55);
+  --lx-header-hover: rgba(255, 255, 255, 0.08);
+
+  /* ============ 语义色 ============ */
+  --lx-success: #10b981;          /* emerald-500 */
+  --lx-success-bg: #d1fae5;
+  --lx-warning: #f59e0b;          /* amber-500 */
+  --lx-warning-bg: #fef3c7;
+  --lx-danger: #ef4444;           /* red-500 */
+  --lx-danger-bg: #fee2e2;
+  --lx-info: #06b6d4;             /* cyan-500 */
+  --lx-info-bg: #cffafe;
+
+  /* ============ 圆角（统一三级 + 特殊） ============ */
+  --lx-radius-sm: 6px;            /* 小元素：标签/芯片 */
+  --lx-radius-md: 10px;           /* 中元素：按钮/输入 */
+  --lx-radius-lg: 14px;           /* 大元素：卡片/对话框 */
+  --lx-radius-xl: 18px;           /* 特大：hero/面板 */
+  --lx-radius-pill: 9999px;       /* 胶囊 */
+
+  /* ============ 阴影（统一三级） ============ */
+  --lx-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --lx-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08);
+  --lx-shadow-lg: 0 8px 24px rgba(15, 23, 42, 0.12);
+  --lx-shadow-primary: 0 4px 14px rgba(99, 102, 241, 0.25);
+  --lx-shadow-header: 0 1px 3px rgba(15, 23, 42, 0.2);
+
+  /* ============ 间距（4px 基准网格） ============ */
+  --lx-space-1: 4px;
+  --lx-space-2: 8px;
+  --lx-space-3: 12px;
+  --lx-space-4: 16px;
+  --lx-space-5: 20px;
+  --lx-space-6: 24px;
+  --lx-space-8: 32px;
+  --lx-space-10: 40px;
+  --lx-space-12: 48px;
+
+  /* ============ 字号（六级） ============ */
+  --lx-font-xs: 12px;
+  --lx-font-sm: 13px;
+  --lx-font-base: 14px;
+  --lx-font-md: 15px;
+  --lx-font-lg: 16px;
+  --lx-font-xl: 18px;
+  --lx-font-2xl: 22px;
+  --lx-font-3xl: 26px;
+
+  /* ============ 字重 ============ */
+  --lx-font-normal: 400;
+  --lx-font-medium: 500;
+  --lx-font-semibold: 600;
+  --lx-font-bold: 700;
+
+  /* ============ 过渡 ============ */
+  --lx-transition: 0.2s ease;
+  --lx-transition-fast: 0.15s ease;
+
+  /* ============ z-index 层级 ============ */
+  --lx-z-header: 10;
+  --lx-z-dropdown: 1000;
+  --lx-z-modal: 2000;
+
+  /* ============ 品牌渐变 ============ */
+  --lx-gradient-primary: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  --lx-gradient-header: linear-gradient(90deg, #0f172a 0%, #1e293b 100%);
+  --lx-gradient-hero: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #312e81 100%);
+  /* 渐变红色：用于强调型按钮（如"添加附件"），白字始终清晰 */
+  --lx-gradient-danger: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  --lx-gradient-danger-hover: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+}
+
+/**
+ * 暗色模式预留（后续启用只需给 <html> 加 data-theme="dark"）
+ */
+[data-theme='dark'] {
+  --lx-bg: #0f172a;
+  --lx-bg-elevated: #1e293b;
+  --lx-bg-subtle: #1e293b;
+  --lx-bg-muted: #1e293b;
+  --lx-border: #334155;
+  --lx-border-light: #1e293b;
+  --lx-border-strong: #475569;
+  --lx-text: #f1f5f9;
+  --lx-text-regular: #cbd5e1;
+  --lx-text-secondary: #94a3b8;
+  --lx-text-placeholder: #64748b;
+  --lx-text-disabled: #475569;
+}

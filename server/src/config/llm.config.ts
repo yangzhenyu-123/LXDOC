@@ -8,19 +8,51 @@
  * - timeout：单次请求超时（毫秒）
  *
  * 设计：所有值走 env，未配置时 enabled=false，业务模块走 @OptionalLlm() 注入并降级返回 null。
+ *
+ * 覆盖层：getter 优先查 SystemSettingsService 维护的内存覆盖（DB system_settings 表），
+ * 再回退 process.env。admin 在线修改后立即生效，无需重启。
+ *
+ * 实现说明：使用 getter 而非静态赋值。
+ * 若用顶层 `const x = process.env.Y` 直接读取，会在模块 import 阶段立即执行，
+ * 此时 @nestjs/config 的 ConfigModule 尚未把 .env 注入 process.env，导致始终读到默认值。
+ * 改为 getter 后，每次属性访问（如 llmConfig.baseUrl）都在运行时读取 process.env，
+ * 确保 ConfigModule 加载 .env 后能拿到正确值。调用方式（属性访问）保持不变。
  */
+import {
+  getOverrideBool,
+  getOverrideNumber,
+  getOverrideString,
+} from '../system/settings-overrides';
+
 export const llmConfig = {
-  enabled:
-    (process.env.LLM_ENABLED ?? 'false').toLowerCase() === 'true',
-  baseUrl: process.env.LLM_BASE_URL ?? 'http://internal-glm/v1',
-  apiKey: process.env.LLM_API_KEY ?? '',
-  model: process.env.LLM_MODEL ?? 'glm-5.2',
-  embedModel: process.env.LLM_EMBED_MODEL ?? '',
-  embedDimensions: Number(process.env.LLM_EMBED_DIMENSIONS ?? '0') || 0,
-  timeout: Number(process.env.LLM_TIMEOUT ?? '30000') || 30000,
+  get enabled(): boolean {
+    return getOverrideBool('llm.enabled', (process.env.LLM_ENABLED ?? 'false').toLowerCase() === 'true');
+  },
+  get baseUrl(): string {
+    return getOverrideString('llm.baseUrl', process.env.LLM_BASE_URL ?? 'http://internal-glm/v1');
+  },
+  get apiKey(): string {
+    return getOverrideString('llm.apiKey', process.env.LLM_API_KEY ?? '');
+  },
+  get model(): string {
+    return getOverrideString('llm.model', process.env.LLM_MODEL ?? 'glm-5.2');
+  },
+  get embedModel(): string {
+    return process.env.LLM_EMBED_MODEL ?? '';
+  },
+  get embedDimensions(): number {
+    return Number(process.env.LLM_EMBED_DIMENSIONS ?? '0') || 0;
+  },
+  get timeout(): number {
+    return getOverrideNumber('llm.timeout', Number(process.env.LLM_TIMEOUT ?? '30000') || 30000);
+  },
   // 最大重试次数（指数退避）
-  maxRetries: Number(process.env.LLM_MAX_RETRIES ?? '2') || 2,
+  get maxRetries(): number {
+    return getOverrideNumber('llm.maxRetries', Number(process.env.LLM_MAX_RETRIES ?? '2') || 2);
+  },
   // 总结单次投喂文本上限（字符数）。超过则截断头尾各半保留，避免超出模型上下文窗口
   // GLM5.2 上下文窗口较大，默认 80000 字符（约 4 万汉字）兼顾质量与成本
-  summaryMaxChars: Number(process.env.LLM_SUMMARY_MAX_CHARS ?? '80000') || 80000,
+  get summaryMaxChars(): number {
+    return getOverrideNumber('llm.summaryMaxChars', Number(process.env.LLM_SUMMARY_MAX_CHARS ?? '80000') || 80000);
+  },
 };

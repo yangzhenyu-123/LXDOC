@@ -8,12 +8,14 @@
       show-icon
       :closable="false"
     />
-    <div v-show="!loading && !error" ref="containerRef" class="oo-container" />
+    <!-- OnlyOffice 9.4 api.js 用 document.getElementById(placeholderId) 查找容器，
+         需传字符串 ID 而非 DOM 元素，否则 getElementById 返回 null 静默跳过 iframe 创建 -->
+    <div v-show="!loading && !error" :id="containerId" ref="containerRef" class="oo-container" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, nextTick, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { getOnlyOfficeConfig, type OnlyOfficeConfig } from '@/api/documents';
 
@@ -26,7 +28,9 @@ interface DocsAPIDocEditor {
 }
 interface DocsAPI {
   DocEditor: new (
-    el: HTMLElement,
+    // OnlyOffice 9.4 api.js 内部用 document.getElementById(placeholderId) 查找容器，
+    // 支持传字符串 ID 或 HTMLElement；传字符串 ID 才能正确创建 iframe
+    el: string | HTMLElement,
     config: OnlyOfficeConfig & {
       events?: Record<string, (e: { data?: unknown }) => void>;
       height?: string;
@@ -51,6 +55,9 @@ const emit = defineEmits<{
 }>();
 
 const containerRef = ref<HTMLDivElement | null>(null);
+// OnlyOffice 9.4 api.js 用 document.getElementById(id) 查找容器，
+// 需传字符串 ID；用 docId 保证多实例唯一
+const containerId = computed(() => `oo-editor-${props.docId}`);
 const loading = ref(true);
 const error = ref<string | null>(null);
 
@@ -117,16 +124,17 @@ function acquireApi(): void {
 
 /**
  * 释放一次 api.js 引用（组件卸载时调用）
- * 引用归零时移除 <script> 标签并重置加载状态，避免 DOM 残留
+ * 注意：不移除 <script> 标签，也不重置 apiPromise。
+ * OnlyOffice api.js 内部 getBasePath() 遍历 document.getElementsByTagName('script')
+ * 查找 src 匹配 api/documents/api.js 的标签来推算 iframe 资源 basePath。
+ * 若移除 script 标签，下次 new DocEditor 时 getBasePath() 返回空字符串，
+ * iframe URL 退化为相对路径 documenteditor/main/index.html，
+ * 被浏览器解析为 /d/documenteditor/... （当前页 /d/<docId> 的相对路径），
+ * 最终被 nginx try_files 回退到 SPA index.html → 编辑器内嵌主界面。
+ * window.DocsAPI 复用即可，script 标签保留在 DOM 中无副作用。
  */
 function releaseApi(): void {
   apiRefCount = Math.max(0, apiRefCount - 1);
-  if (apiRefCount === 0) {
-    const el = document.querySelector(`script[src="${apiJsUrl}"]`);
-    if (el && el.parentNode) el.parentNode.removeChild(el);
-    apiPromise = null;
-    // window.DocsAPI 保留（脚本执行后已挂载到内存），下次 loadApi 直接复用
-  }
 }
 
 // ============================================================
@@ -214,13 +222,27 @@ async function init(): Promise<void> {
       },
     };
 
-    editor = new api.DocEditor(containerRef.value, fullConfig);
+    // OnlyOffice DocEditor 需要容器可见才能正确测量尺寸并创建 iframe。
+    // 模板用 v-show="!loading && !error" 控制容器可见性，
+    // 需在构造前设 loading=false 使容器可见，否则 DocEditor 在 display:none
+    // 容器中无法初始化 → 编辑器空白（OnlyOffice 集成经典问题）。
+    // OnlyOffice iframe 自带 loading 画面，提前隐藏我们的 loading 不会出现空白。
+    // 注意：Vue 响应式更新是异步的，设 loading=false 后需 await nextTick()
+    // 等 DOM 真正更新（display 恢复）后再构造 DocEditor。
+    loading.value = false;
+    await nextTick();
+    if (token !== initToken) return;
+    // OnlyOffice 9.4 api.js 内部用 document.getElementById(placeholderId) 查找容器，
+    // 必须传字符串 ID（containerId），传 DOM 元素会返回 null → 静默不创建 iframe
+    editor = new api.DocEditor(containerId.value, fullConfig);
   } catch (err: any) {
     if (token !== initToken) return;
     error.value =
       err?.response?.data?.message ?? err?.message ?? 'OnlyOffice 初始化失败';
   } finally {
     if (token === initToken) {
+      // loading 在 DocEditor 构造前已设为 false（见上方注释），
+      // 此处确保异常路径也设为 false
       loading.value = false;
     }
     release();
@@ -274,7 +296,9 @@ watch(
 }
 .oo-container {
   flex: 1;
-  min-height: 0;
+  /* OnlyOffice DocEditor 需要容器有明确高度才能创建 iframe；
+     min-height:0 在 flex 布局中会塌缩为 0，导致编辑器空白 */
+  height: 70vh;
   width: 100%;
 }
 .oo-container :deep(iframe) {
