@@ -36,18 +36,31 @@ export class GlmProvider implements LlmProvider {
     messages: LlmMessage[],
     opts?: LlmChatOptions,
   ): Promise<LlmChatResult> {
-    if (!this.isReady()) {
+    // 支持通过 opts 覆盖连接配置（admin 配多套 LLM 时按用户选择注入）
+    const baseUrl = opts?.baseUrl ?? llmConfig.baseUrl;
+    const apiKey = opts?.apiKey ?? llmConfig.apiKey;
+    // 有覆盖时即使全局未启用也可调用（多套配置场景）
+    if (!opts?.baseUrl && !this.isReady()) {
       throw new LlmNotSupportedException('GLM 未启用或未配置 baseUrl');
     }
+    if (!baseUrl) {
+      throw new LlmNotSupportedException('GLM 未配置 baseUrl');
+    }
     const model = opts?.model ?? llmConfig.model;
-    const url = `${llmConfig.baseUrl.replace(/\/$/, '')}/chat/completions`;
-    const body = {
+    const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+    const body: Record<string, unknown> = {
       model,
       messages,
       temperature: opts?.temperature ?? 0.7,
       ...(opts?.maxTokens ? { max_tokens: opts.maxTokens } : {}),
     };
-    const data = await this.requestWithRetry(url, body, opts?.timeout);
+    // 推理模型（GLM-5.2）支持通过 chat_template_kwargs.enable_thinking 关闭推理。
+    // 显式传 enableThinking=false 时关闭（简单任务如路径生成/标签），否则保持默认（开启推理）。
+    // 不支持该参数的模型会忽略此字段，无副作用。
+    if (opts?.enableThinking === false) {
+      body.chat_template_kwargs = { enable_thinking: false };
+    }
+    const data = await this.requestWithRetry(url, body, opts?.timeout, apiKey);
     const choice = data?.choices?.[0]?.message?.content ?? '';
     return {
       content: choice,
@@ -69,7 +82,7 @@ export class GlmProvider implements LlmProvider {
     }
     const url = `${llmConfig.baseUrl.replace(/\/$/, '')}/embeddings`;
     const body = { model: useModel, input: text };
-    const data = await this.requestWithRetry(url, body, undefined);
+    const data = await this.requestWithRetry(url, body, undefined, llmConfig.apiKey);
     const vector: number[] = data?.data?.[0]?.embedding ?? [];
     return {
       vector,
@@ -88,12 +101,13 @@ export class GlmProvider implements LlmProvider {
     url: string,
     body: unknown,
     timeoutOverride?: number,
+    apiKeyOverride?: string,
   ): Promise<any> {
     const maxRetries = llmConfig.maxRetries;
     let lastErr: unknown;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        return await this.requestOnce(url, body, timeoutOverride);
+        return await this.requestOnce(url, body, timeoutOverride, apiKeyOverride);
       } catch (err: any) {
         lastErr = err;
         const status = err?.status;
@@ -117,6 +131,7 @@ export class GlmProvider implements LlmProvider {
     url: string,
     body: unknown,
     timeoutOverride?: number,
+    apiKeyOverride?: string,
   ): Promise<any> {
     const timeout = timeoutOverride ?? llmConfig.timeout;
     const controller = new AbortController();
@@ -125,8 +140,9 @@ export class GlmProvider implements LlmProvider {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
       };
-      if (llmConfig.apiKey) {
-        headers.Authorization = `Bearer ${llmConfig.apiKey}`;
+      const key = apiKeyOverride ?? llmConfig.apiKey;
+      if (key) {
+        headers.Authorization = `Bearer ${key}`;
       }
       const resp = await fetch(url, {
         method: 'POST',

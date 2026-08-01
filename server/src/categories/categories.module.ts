@@ -29,7 +29,7 @@ export class CategoriesModule implements OnApplicationBootstrap {
 
   async onApplicationBootstrap() {
     try {
-      await this.service.seedIfEmpty();
+      await this.service.onStartupSeed();
     } catch (err) {
       // 数据库未就绪时不阻断启动
       this.logger.error(

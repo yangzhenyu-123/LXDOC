@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Document } from '../documents/document.entity';
 import { DocumentVersion } from '../documents/document-version.entity';
+import { DocumentAttachment } from '../documents/document-attachment.entity';
 import { Category } from '../categories/category.entity';
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { UploadsController } from './uploads.controller';
@@ -13,7 +14,7 @@ import { DoclingParser } from './parsers/docling.parser';
 
 /**
  * 文件上传模块
- * - 注册 Document / DocumentVersion / Category 三个实体的 Repository
+ * - 注册 Document / DocumentVersion / DocumentAttachment / Category 四个实体的 Repository
  * - 引入 OrganizationsModule 以使用 AccessControlService 校验上传归属权限
  * - 注册 UploadsService 与多个 FileParser：
  *   TextParser（md/txt）/ PandocParser（docx/odt 回退）/ PdfParser（pdf 回退）
@@ -21,7 +22,12 @@ import { DoclingParser } from './parsers/docling.parser';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Document, DocumentVersion, Category]),
+    TypeOrmModule.forFeature([
+      Document,
+      DocumentVersion,
+      DocumentAttachment,
+      Category,
+    ]),
     OrganizationsModule,
   ],
   controllers: [UploadsController],

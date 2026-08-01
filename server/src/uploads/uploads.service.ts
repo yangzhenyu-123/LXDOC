@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { Document, DocumentFormat, DocumentOwnerType, ContentSource } from '../documents/document.entity';
 import { DocumentVersion } from '../documents/document-version.entity';
+import { DocumentAttachment, AttachmentType } from '../documents/document-attachment.entity';
 import { Category } from '../categories/category.entity';
 import { TextParser } from './parsers/text.parser';
 import { PandocParser } from './parsers/pandoc.parser';
@@ -23,7 +24,7 @@ import { doclingConfig } from '../config/docling.config';
 import { AccessControlService } from '../organizations/access-control.service';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 
-// 扩展名 → DocumentFormat 映射
+// 扩展名 → DocumentFormat 映射（含 kkFileView 支持的 office 类 + 版式 + 模板格式）
 const EXT_TO_FORMAT: Record<string, DocumentFormat> = {
   '.md': DocumentFormat.MD,
   '.markdown': DocumentFormat.MD,
@@ -31,10 +32,57 @@ const EXT_TO_FORMAT: Record<string, DocumentFormat> = {
   '.docx': DocumentFormat.DOCX,
   '.odt': DocumentFormat.ODT,
   '.pdf': DocumentFormat.PDF,
+  // office 类（正文不可解析，仅 kkFileView 预览）
+  '.doc': DocumentFormat.DOC,
+  '.xls': DocumentFormat.XLS,
+  '.xlsx': DocumentFormat.XLSX,
+  '.ppt': DocumentFormat.PPT,
+  '.pptx': DocumentFormat.PPTX,
+  '.csv': DocumentFormat.CSV,
+  '.tsv': DocumentFormat.TSV,
+  '.wps': DocumentFormat.WPS,
+  '.dps': DocumentFormat.DPS,
+  '.et': DocumentFormat.ET,
+  '.ett': DocumentFormat.ETT,
+  '.wpt': DocumentFormat.WPT,
+  '.ods': DocumentFormat.ODS,
+  '.odp': DocumentFormat.ODP,
+  '.ott': DocumentFormat.OTT,
+  '.fodt': DocumentFormat.FODT,
+  '.fods': DocumentFormat.FODS,
+  // 版式/富文本
+  '.ofd': DocumentFormat.OFD,
+  '.rtf': DocumentFormat.RTF,
+  // Office 宏/模板
+  '.xlsm': DocumentFormat.XLSM,
+  '.dotm': DocumentFormat.DOTM,
+  '.xlt': DocumentFormat.XLT,
+  '.xltm': DocumentFormat.XLTM,
+  '.dot': DocumentFormat.DOT,
+  '.xlam': DocumentFormat.XLAM,
+  '.dotx': DocumentFormat.DOTX,
+  '.xla': DocumentFormat.XLA,
+  '.pptm': DocumentFormat.PPTM,
+  // OpenOffice 模板
+  '.ots': DocumentFormat.OTS,
+  '.otp': DocumentFormat.OTP,
+  '.six': DocumentFormat.SIX,
 };
 
 // 允许的扩展名白名单（用于 controller 校验）
 export const ALLOWED_EXTENSIONS = uploadConfig.allowedDocExtensions;
+
+// 可解析正文的格式（其他格式 content 为空，仅 kkFileView 预览）
+// csv/tsv 是纯文本，走 TextParser 直接读 utf-8 入索引（仅检索用，编辑走 OnlyOffice cell）
+const PARSEABLE_FORMATS = new Set<DocumentFormat>([
+  DocumentFormat.MD,
+  DocumentFormat.TXT,
+  DocumentFormat.CSV,
+  DocumentFormat.TSV,
+  DocumentFormat.DOCX,
+  DocumentFormat.ODT,
+  DocumentFormat.PDF,
+]);
 
 /**
  * 清洗 multer 给的 originalname，防止路径穿越：
@@ -61,6 +109,8 @@ export class UploadsService {
     private readonly documentRepo: Repository<Document>,
     @InjectRepository(DocumentVersion)
     private readonly versionRepo: Repository<DocumentVersion>,
+    @InjectRepository(DocumentAttachment)
+    private readonly attachRepo: Repository<DocumentAttachment>,
     @InjectRepository(Category)
     private readonly categoryRepo: Repository<Category>,
     private readonly textParser: TextParser,
@@ -94,6 +144,7 @@ export class UploadsService {
     user: AuthUser,
     ownerType: DocumentOwnerType = DocumentOwnerType.PERSONAL,
     ownerId?: string,
+    isCollection = false,
   ): Promise<Document> {
     if (!file) {
       throw new BadRequestException('未提供上传文件');
@@ -115,7 +166,11 @@ export class UploadsService {
     }
 
     // 清洗文件名，防止路径穿越（originalname 来自 multer，未经清洗）
-    const safeOriginalName = sanitizeFilename(file.originalname);
+    // multer 的 originalname 默认按 latin1 解码，中文文件名（UTF-8）会被当 latin1 导致乱码，
+    // 需先将 latin1 字节还原为 UTF-8（纯 ASCII 文件名不受影响）
+    const safeOriginalName = sanitizeFilename(
+      Buffer.from(file.originalname, 'latin1').toString('utf8'),
+    );
     // 标题先用文件名去 ext
     const ext = path.extname(safeOriginalName);
     const title =
@@ -154,12 +209,18 @@ export class UploadsService {
         );
       }
     }
+    // contentSource 按格式预设：
+    // - 可解析格式：md/txt/csv/tsv=manual，docx/odt=pandoc，pdf=pdf_text
+    // - 不可解析格式（office 类）：content 为空，仅 kkFileView 预览，标记为 manual
+    const isParseable = PARSEABLE_FORMATS.has(format);
     const initialContentSource =
-      format === DocumentFormat.PDF
-        ? ContentSource.PDF_TEXT
-        : format === DocumentFormat.DOCX || format === DocumentFormat.ODT
-          ? ContentSource.PANDOC
-          : ContentSource.MANUAL;
+      !isParseable
+        ? ContentSource.MANUAL
+        : format === DocumentFormat.PDF
+          ? ContentSource.PDF_TEXT
+          : format === DocumentFormat.DOCX || format === DocumentFormat.ODT
+            ? ContentSource.PANDOC
+            : ContentSource.MANUAL;
     const doc = this.documentRepo.create({
       categoryId,
       title,
@@ -171,6 +232,7 @@ export class UploadsService {
       ownerType,
       ownerId: resolvedOwnerId,
       contentSource: initialContentSource,
+      isCollection: isCollection || undefined,
     });
     const saved = await this.documentRepo.save(doc);
     const docId = saved.id;
@@ -201,13 +263,23 @@ export class UploadsService {
       wroteTmpInput = true;
 
       // 5. 按 format 调用对应 parser
-      //    md/txt 始终走 TextParser（纯文本无需重型解析）；
-      //    docx/odt/pdf 在 DOCLING_ENABLED 时优先走 DoclingParser（统一解析，
-      //    支持 PDF 图片/表格/版式/OCR），失败自动回退到 pandoc/pdf-parse
+      //    不可解析格式（office 类：doc/xls/xlsx/ppt/pptx/csv/tsv/wps/dps/et/ett/wpt/ods/odp/ott/fodt/fods）
+      //    跳过 parser，content 为空，仅 kkFileView 预览。
+      //    可解析格式：md/txt/csv/tsv 走 TextParser（纯文本直读 utf-8）；
+      //    docx/odt/pdf 优先 docling，回退 pandoc/pdf-parse
       let result: { content: string | null; title?: string; pages?: number };
       let usedDocling = false;
       try {
-        if (format === DocumentFormat.MD || format === DocumentFormat.TXT) {
+        if (!isParseable) {
+          // 不可解析格式：不调用 parser，content 为空
+          result = { content: null };
+        } else if (
+          format === DocumentFormat.MD ||
+          format === DocumentFormat.TXT ||
+          format === DocumentFormat.CSV ||
+          format === DocumentFormat.TSV
+        ) {
+          // 纯文本类：直接读 utf-8，不走 docling（csv/tsv docling 会转 markdown 表格，破坏原始内容）
           result = await this.textParser.parse(tmpInput, docId, format);
         } else if (doclingConfig.enabled) {
           try {
@@ -342,5 +414,116 @@ export class UploadsService {
       url: `/api/files/${scope}/image/${filename}`,
       filename,
     };
+  }
+
+  /**
+   * 创建文档集（无文件，主文档 isCollection=true，正文为空）
+   * 由 uploads.controller POST /collection 调用
+   * - 校验分类存在
+   * - 校验组织归属权限（与 ingest 同逻辑）
+   * - 创建 Document（format=MD 占位，content=null，isCollection=true）
+   * - 创建首版本快照（version=1, content=''）
+   * - 把成员文档引用到集合（attach_type=document）
+   */
+  async createCollection(
+    title: string,
+    categoryId: string,
+    memberDocIds: string[],
+    user: AuthUser,
+    ownerType: DocumentOwnerType = DocumentOwnerType.PERSONAL,
+    ownerId?: string,
+  ): Promise<Document> {
+    if (!title?.trim()) {
+      throw new BadRequestException('集合标题不能为空');
+    }
+    // 校验分类存在
+    const category = await this.categoryRepo.findOne({
+      where: { id: categoryId },
+    });
+    if (!category) {
+      throw new NotFoundException(`分类 ${categoryId} 不存在`);
+    }
+
+    // 校验组织归属权限（与 ingest 同逻辑）
+    const resolvedOwnerId =
+      ownerType === DocumentOwnerType.PERSONAL ? user.id : (ownerId ?? null);
+    if (
+      (ownerType === DocumentOwnerType.GROUP ||
+        ownerType === DocumentOwnerType.DEPARTMENT) &&
+      !resolvedOwnerId
+    ) {
+      throw new BadRequestException(
+        `ownerType=${ownerType} 需提供 ownerId（组织节点 id）`,
+      );
+    }
+    if (
+      (ownerType === DocumentOwnerType.GROUP ||
+        ownerType === DocumentOwnerType.DEPARTMENT) &&
+      resolvedOwnerId
+    ) {
+      const canWriteOrg = await this.accessControl.canWrite(user, {
+        ownerType,
+        ownerId: resolvedOwnerId,
+        createdBy: user.id,
+      });
+      if (!canWriteOrg) {
+        throw new ForbiddenException(
+          `无权向组织节点 ${resolvedOwnerId} 创建文档集`,
+        );
+      }
+    }
+
+    // 创建集合主文档（format=MD 占位，content=null）
+    const collection = this.documentRepo.create({
+      categoryId,
+      title: title.trim(),
+      content: null,
+      format: DocumentFormat.MD,
+      originalPath: null,
+      version: 1,
+      createdBy: user.id,
+      ownerType,
+      ownerId: resolvedOwnerId,
+      contentSource: ContentSource.MANUAL,
+      isCollection: true,
+    });
+    const saved = await this.documentRepo.save(collection);
+
+    // 创建首版本快照（与普通文档一致）
+    await this.versionRepo.save(
+      this.versionRepo.create({
+        documentId: saved.id,
+        version: 1,
+        content: '',
+      }),
+    );
+
+    // 把成员文档引用到集合（过滤掉不存在的）
+    const validMemberIds: string[] = [];
+    for (let i = 0; i < memberDocIds.length; i++) {
+      const mid = memberDocIds[i];
+      if (mid === saved.id) continue; // 不能引用自己
+      const linked = await this.documentRepo.findOne({ where: { id: mid } });
+      if (!linked) continue;
+      validMemberIds.push(mid);
+      await this.attachRepo.save(
+        this.attachRepo.create({
+          documentId: saved.id,
+          attachType: AttachmentType.DOCUMENT,
+          name: linked.title,
+          filePath: null,
+          fileSize: null,
+          fileExt: null,
+          linkedDocumentId: mid,
+          sort: i + 1,
+          createdBy: user.id,
+        }),
+      );
+    }
+
+    this.logger.log(
+      `用户 ${user.id} 创建文档集 ${saved.id}（${title}），有效成员 ${validMemberIds.length} 个`,
+    );
+    return saved;
   }
 }

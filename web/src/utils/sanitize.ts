@@ -24,8 +24,9 @@ export function sanitizeHtml(html: string): string {
       'class', 'id', 'target', 'rel',
       'style', // pdf2htmlEX/pandoc 依赖 style 做版式定位；DOMPurify 会过滤 expression/javascript:
     ],
-    // 允许协议：仅 http(s)/mailto/data(图片)，禁止 javascript:
-    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|data:image\/(?:png|jpeg|gif|webp);base64,)/i,
+    // 允许协议：http(s)/mailto/data(图片)/相对路径(同源)，禁止 javascript:
+    // 相对路径（/api/files/...）用于后端鉴权图片/PDF URL，需显式放行
+    ALLOWED_URI_REGEXP: /^(?:(?:https?:|mailto:)?\/\/|\/|data:image\/(?:png|jpeg|gif|webp);base64,)/i,
   });
 }
 

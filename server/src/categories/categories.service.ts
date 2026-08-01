@@ -6,7 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { Category, CategoryType } from './category.entity';
 import { Document } from '../documents/document.entity';
 import { CreateCategoryDto } from './dto/create-category.dto';
@@ -34,6 +34,7 @@ export class CategoriesService {
     @InjectRepository(Document)
     private readonly documentRepo: Repository<Document>,
     private readonly accessControl: AccessControlService,
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -84,7 +85,7 @@ export class CategoriesService {
     dto: CreateCategoryDto,
     currentUser: CurrentUser,
   ): Promise<CategoryResponseDto> {
-    let resolvedType: CategoryType;
+    let resolvedType: string;
 
     if (dto.parentId) {
       // 子分类：校验父级存在，type 自动继承父级
@@ -95,9 +96,9 @@ export class CategoriesService {
         throw new BadRequestException(`父级分类 ${dto.parentId} 不存在`);
       }
       // 父级 type 在顶层已校验必填，此处断言非空
-      resolvedType = parent.type as CategoryType;
+      resolvedType = parent.type as string;
     } else {
-      // 顶层分类：type 必填
+      // 顶层分类：type 必填（任意字符串，最长 50 位）
       if (!dto.type) {
         throw new BadRequestException('顶层分类必须指定 type');
       }
@@ -211,7 +212,113 @@ export class CategoriesService {
   }
 
   /**
-   * 启动时调用：若 categories 表为空则插入三个顶层分类种子数据
+   * 启动时调用：
+   * 1. migrateTypeColumn：将 type 列从 PG enum 迁移为 varchar(50)（幂等，已迁移则跳过）
+   * 2. backfillMissingTypes：按名称回填 type 为 NULL 的已知顶层分类
+   * 3. seedIfEmpty：表为空时插入 11 个顶层分类种子
+   * 4. seedNewCategories：增量补种新增的默认分类（不触碰已有）
+   */
+  async onStartupSeed(): Promise<void> {
+    await this.migrateTypeColumn();
+    await this.backfillMissingTypes();
+    await this.seedIfEmpty();
+    await this.seedNewCategories();
+  }
+
+  /**
+   * 将 categories.type 列从 PG enum 迁移为 varchar(50)
+   * 幂等：已为 varchar 时跳过。使用 USING type::text 保留原值。
+   */
+  private async migrateTypeColumn(): Promise<void> {
+    try {
+      // 查询当前列的 data_type
+      const rows = await this.dataSource.query(
+        `SELECT data_type FROM information_schema.columns
+         WHERE table_name = 'categories' AND column_name = 'type'`,
+      );
+      if (rows.length === 0) return; // 列不存在，交给 synchronize 建表
+      const dataType = rows[0].data_type;
+      if (dataType === 'USER-DEFINED' || dataType === 'ARRAY') {
+        // 仍是 enum 类型，转换为 varchar
+        await this.dataSource.query(
+          `ALTER TABLE categories ALTER COLUMN type TYPE varchar(50) USING type::text`,
+        );
+        this.logger.log('已将 categories.type 列从 enum 迁移为 varchar(50)');
+      }
+    } catch (err) {
+      this.logger.warn(`type 列迁移检查失败（可能 synchronize 已处理）：${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * 按名称回填 type 为 NULL 的已知顶层分类
+   * 覆盖 enum→varchar 转换中可能丢失 type 值的 3 个原始种子
+   */
+  private async backfillMissingTypes(): Promise<void> {
+    const nameTypeMap: Record<string, string> = {
+      技术文档: CategoryType.TECH_DOC,
+      解决方案: CategoryType.SOLUTION,
+      'Bug 分析报告': CategoryType.BUG_REPORT,
+    };
+    const topLevel = await this.categoryRepo.find({
+      where: { parentId: null as unknown as string, type: null as unknown as string },
+    });
+    let fixed = 0;
+    for (const cat of topLevel) {
+      const t = nameTypeMap[cat.name];
+      if (t) {
+        cat.type = t;
+        await this.categoryRepo.save(cat);
+        fixed++;
+      }
+    }
+    if (fixed > 0) {
+      this.logger.log(`已回填 ${fixed} 个顶层分类的 type 值`);
+    }
+  }
+
+  /**
+   * 增量补种默认顶层分类：按名称检查，不存在则插入
+   * 不触碰已有的分类（含用户自建），仅补齐新增的默认分类
+   */
+  private async seedNewCategories(): Promise<void> {
+    const defaults = [
+      { name: '新人培训', type: CategoryType.NEWCOMER, sort: 1 },
+      { name: '规章制度', type: CategoryType.REGULATION, sort: 2 },
+      { name: '技术文档', type: CategoryType.TECH_DOC, sort: 3 },
+      { name: '解决方案', type: CategoryType.SOLUTION, sort: 4 },
+      { name: '部门公共信息', type: CategoryType.DEPT_PUBLIC, sort: 5 },
+      { name: '重要项目', type: CategoryType.KEY_PROJECT, sort: 6 },
+      { name: '操作系统知识', type: CategoryType.OS_KNOWLEDGE, sort: 7 },
+      { name: 'Bug 分析报告', type: CategoryType.BUG_REPORT, sort: 8 },
+      { name: '重要bug记录', type: CategoryType.KEY_BUG, sort: 9 },
+      { name: '工程问题知识库', type: CategoryType.ENG_ISSUES, sort: 10 },
+      { name: '培训资料', type: CategoryType.TRAINING, sort: 11 },
+    ];
+    let added = 0;
+    for (const d of defaults) {
+      const exists = await this.categoryRepo.findOne({
+        where: { parentId: null as unknown as string, name: d.name },
+      });
+      if (!exists) {
+        await this.categoryRepo.save(
+          this.categoryRepo.create({
+            parentId: null,
+            name: d.name,
+            type: d.type,
+            sort: d.sort,
+          }),
+        );
+        added++;
+      }
+    }
+    if (added > 0) {
+      this.logger.log(`增量补种 ${added} 个默认顶层分类`);
+    }
+  }
+
+  /**
+   * 启动时调用：若 categories 表为空则插入 11 个顶层分类种子数据
    */
   async seedIfEmpty(): Promise<void> {
     const count = await this.categoryRepo.count();
@@ -221,9 +328,17 @@ export class CategoriesService {
     }
 
     const seeds = [
-      { name: '技术文档', type: CategoryType.TECH_DOC, sort: 1 },
-      { name: '解决方案', type: CategoryType.SOLUTION, sort: 2 },
-      { name: 'Bug 分析报告', type: CategoryType.BUG_REPORT, sort: 3 },
+      { name: '新人培训', type: CategoryType.NEWCOMER, sort: 1 },
+      { name: '规章制度', type: CategoryType.REGULATION, sort: 2 },
+      { name: '技术文档', type: CategoryType.TECH_DOC, sort: 3 },
+      { name: '解决方案', type: CategoryType.SOLUTION, sort: 4 },
+      { name: '部门公共信息', type: CategoryType.DEPT_PUBLIC, sort: 5 },
+      { name: '重要项目', type: CategoryType.KEY_PROJECT, sort: 6 },
+      { name: '操作系统知识', type: CategoryType.OS_KNOWLEDGE, sort: 7 },
+      { name: 'Bug 分析报告', type: CategoryType.BUG_REPORT, sort: 8 },
+      { name: '重要bug记录', type: CategoryType.KEY_BUG, sort: 9 },
+      { name: '工程问题知识库', type: CategoryType.ENG_ISSUES, sort: 10 },
+      { name: '培训资料', type: CategoryType.TRAINING, sort: 11 },
     ];
 
     for (const seed of seeds) {
@@ -236,7 +351,7 @@ export class CategoriesService {
         }),
       );
     }
-    this.logger.log('已插入三个顶层分类种子数据');
+    this.logger.log('已插入 11 个顶层分类种子数据');
   }
 
   /**

@@ -62,12 +62,51 @@ export class DocumentsController {
     return this.service.findRecent(Number.isFinite(n) ? n : 10, user!);
   }
 
+  // AI 知识库树：列出所有 AI 总结文档（含 knowledgePath，前端构建树）
+  // 注意：必须声明在 documents/:id 之前，否则 'knowledge-tree' 会被 :id 匹配
+  @ApiOperation({ summary: '获取 AI 知识库文档列表（含知识库路径）' })
+  @Get('documents/knowledge-tree')
+  findKnowledgeTree(@CurrentUser() user: AuthUser) {
+    return this.service.findKnowledgeTree(user);
+  }
+
+  // 我的文档：当前用户创建的文档
+  @ApiOperation({ summary: '获取我创建的文档' })
+  @Get('documents/my')
+  findMyDocuments(@CurrentUser() user: AuthUser) {
+    return this.service.findMyDocuments(user);
+  }
+
+  // 我的收藏：当前用户收藏的文档
+  @ApiOperation({ summary: '获取我收藏的文档' })
+  @Get('documents/favorites')
+  findFavorites(@CurrentUser() user: AuthUser) {
+    return this.service.findFavorites(user);
+  }
+
+  // 我的组文档：当前用户所在组织（含祖先链）下的文档
+  @ApiOperation({ summary: '获取我所在组的文档' })
+  @Get('documents/my-org')
+  findMyOrgDocuments(@CurrentUser() user: AuthUser) {
+    return this.service.findMyOrgDocuments(user);
+  }
+
+  // 标签聚合：返回所有标签及文档计数
+  @ApiOperation({ summary: '获取标签聚合（标签云）' })
+  @Get('documents/tags')
+  getTags(@CurrentUser() user: AuthUser) {
+    return this.service.getTagsWithCount(user);
+  }
+
   // 获取单个文档（含 content）
   @ApiOperation({ summary: '获取单个文档（含 content）' })
   @ApiParam({ name: 'id', description: '文档 ID', type: String })
   @Get('documents/:id')
-  findOne(@Param('id') id: string, @CurrentUser() user: AuthUser) {
-    return this.service.findOne(id, user);
+  async findOne(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    const doc = await this.service.findOne(id, user);
+    // 附加当前用户是否已收藏（供详情页星标按钮显示状态）
+    const favorited = await this.service.isFavorited(id, user);
+    return { ...doc, favorited };
   }
 
   // 获取 docx/odt 文档的 HTML 预览片段
@@ -249,5 +288,13 @@ export class DocumentsController {
     const include =
       includeChildren === 'true' || includeChildren === '1';
     return this.service.listByCategory(id, user, include);
+  }
+
+  // 切换收藏状态（星标/取消星标）
+  @ApiOperation({ summary: '切换文档收藏状态' })
+  @ApiParam({ name: 'id', description: '文档 ID', type: String })
+  @Post('documents/:id/favorite')
+  toggleFavorite(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.service.toggleFavorite(id, user);
   }
 }

@@ -25,6 +25,10 @@ PORT = int(os.environ.get("PORT", "7000"))
 # 预解压目录中的 AppRun（构建时由 --appimage-extract 生成）
 APP_RUN = os.environ.get("PDF2HTML_BIN", "/opt/pdf2htmlex/AppRun")
 APP_IMAGE = "/opt/pdf2htmlEX.AppImage"
+# AppRun 直接链接到 pdf2htmlEX 二进制，没有 AppImage runtime 设置数据目录，
+# 需显式指定 --data-dir 与 --poppler-data-dir，否则报 "Cannot open the manifest file"
+DATA_DIR = "/opt/pdf2htmlex/usr/local/share/pdf2htmlEX"
+POPPLER_DATA_DIR = "/opt/pdf2htmlex/usr/local/share/pdf2htmlEX/poppler"
 MAX_BODY = 50 * 1024 * 1024  # 50MB
 TIMEOUT = 120  # 单次转换超时（秒），与后端 runBinary 默认超时对齐
 
@@ -40,7 +44,16 @@ def convert(pdf_path, out_path):
     """调用 pdf2htmlEX 将 pdf_path 转为 out_path（HTML）"""
     cmd = resolve_bin() + [
         "--zoom", "1.3",
-        "--embed", "cfhj",  # 嵌入 css/font/image，产出单文件 HTML
+        # 嵌入 css/font/image/javascript 到输出 HTML，产出单文件
+        # 注意：pdf2htmlEX 0.18.8 的 --embed <string> 不支持 'h' 字符，
+        # 故用单独的 --embed-* 选项代替 --embed cfij，兼容性更好
+        "--embed-css", "1",
+        "--embed-font", "1",
+        "--embed-image", "1",
+        "--embed-javascript", "1",
+        # AppRun 无 AppImage runtime 环境，需显式指定数据目录
+        "--data-dir", DATA_DIR,
+        "--poppler-data-dir", POPPLER_DATA_DIR,
         pdf_path,
         out_path,
     ]

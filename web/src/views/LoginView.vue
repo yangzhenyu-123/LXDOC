@@ -1,19 +1,19 @@
 <script setup lang="ts">
 import { reactive, ref } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { useRoute } from 'vue-router';
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus';
 import { useAuthStore } from '@/stores/auth';
 
 // 登录页：邮箱 + 密码 + 登录按钮；登录成功后按 redirect query 跳转
-const router = useRouter();
 const route = useRoute();
 const authStore = useAuthStore();
 
 // 登录表单
+// 注意：不预填默认账号密码，避免凭据泄露（生产环境尤其重要）
 const loginFormRef = ref<FormInstance>();
 const loginForm = reactive({
-  email: 'admin@lxdoc.local',
-  password: 'lxdoc12345',
+  email: '',
+  password: '',
 });
 const loginLoading = ref(false);
 
@@ -63,12 +63,13 @@ async function submitLogin() {
     try {
       await authStore.login(loginForm.email, loginForm.password);
       ElMessage.success('登录成功');
+      // 用硬跳转替代 router.push：登录页与主布局在 App.vue 中通过 v-if 切换，
+      // SPA 路由跳转时主布局首次挂载的组件初始化时序不可靠，可能出现主界面不渲染。
+      // 硬跳转强制 App.vue 重新挂载、restore() 重新执行、主布局组件完整初始化。
       const redirect = route.query.redirect;
-      if (typeof redirect === 'string' && redirect) {
-        router.push(redirect);
-      } else {
-        router.push('/');
-      }
+      const target =
+        typeof redirect === 'string' && redirect ? redirect : '/';
+      window.location.href = target;
     } catch (e: any) {
       const msg = e?.response?.data?.message || e?.message || '登录失败';
       ElMessage.error(typeof msg === 'string' ? msg : '登录失败');
@@ -95,7 +96,7 @@ async function submitRegister() {
   if (!registerFormRef.value) return;
   await registerFormRef.value.validate(async (valid) => {
     if (!valid) return;
-    registerLoading.value = true;
+      registerLoading.value = true;
     try {
       await authStore.register({
         email: registerForm.email,
@@ -104,12 +105,11 @@ async function submitRegister() {
       });
       ElMessage.success('注册成功，已自动登录');
       registerVisible.value = false;
+      // 与登录一致：硬跳转确保主布局完整初始化（见 submitLogin 注释）
       const redirect = route.query.redirect;
-      if (typeof redirect === 'string' && redirect) {
-        router.push(redirect);
-      } else {
-        router.push('/');
-      }
+      const target =
+        typeof redirect === 'string' && redirect ? redirect : '/';
+      window.location.href = target;
     } catch (e: any) {
       const status = e?.response?.status;
       const msg = e?.response?.data?.message || e?.message || '注册失败';
@@ -128,7 +128,12 @@ async function submitRegister() {
 <template>
   <div class="login-page">
     <div class="login-card">
-      <div class="login-title">LXDOC 企业知识库 - 登录</div>
+      <!-- 品牌标识 -->
+      <div class="login-brand">
+        <div class="brand-logo">LX</div>
+        <h1 class="brand-name">LXDOC</h1>
+        <p class="brand-sub">企业知识库</p>
+      </div>
       <el-form
         ref="loginFormRef"
         :model="loginForm"
@@ -168,9 +173,6 @@ async function submitRegister() {
           </el-button>
         </div>
       </el-form>
-      <div class="login-hint">
-        默认管理员：admin@lxdoc.local / lxdoc12345（仅用于首次登录提示）
-      </div>
     </div>
 
     <!-- 注册弹窗 -->
@@ -222,32 +224,87 @@ async function submitRegister() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #1f2a44 0%, #001529 100%);
+  background: var(--lx-gradient-hero);
+  position: relative;
+  overflow: hidden;
 }
+/* 背景装饰光晕 */
+.login-page::before,
+.login-page::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.3;
+  pointer-events: none;
+}
+.login-page::before {
+  width: 400px;
+  height: 400px;
+  background: var(--lx-primary);
+  top: -100px;
+  left: -100px;
+}
+.login-page::after {
+  width: 360px;
+  height: 360px;
+  background: var(--lx-accent);
+  bottom: -80px;
+  right: -80px;
+}
+
 .login-card {
-  width: 380px;
-  padding: 32px 28px 24px;
-  background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  width: 400px;
+  padding: var(--lx-space-8) var(--lx-space-6) var(--lx-space-6);
+  background: var(--lx-bg-elevated);
+  border-radius: var(--lx-radius-lg);
+  box-shadow: var(--lx-shadow-lg);
+  position: relative;
+  z-index: 1;
 }
-.login-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: #1f2a44;
-  text-align: center;
-  margin-bottom: 24px;
+
+/* 品牌标识 */
+.login-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: var(--lx-space-8);
 }
+.brand-logo {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--lx-radius-lg);
+  background: var(--lx-gradient-primary);
+  color: var(--lx-text-inverse);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--lx-font-xl);
+  font-weight: var(--lx-font-bold);
+  letter-spacing: 1px;
+  margin-bottom: var(--lx-space-3);
+  box-shadow: var(--lx-shadow-primary);
+}
+.brand-name {
+  margin: 0;
+  font-size: var(--lx-font-2xl);
+  font-weight: var(--lx-font-bold);
+  letter-spacing: 2px;
+  background: linear-gradient(90deg, var(--lx-primary), var(--lx-accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.brand-sub {
+  margin: var(--lx-space-1) 0 0;
+  font-size: var(--lx-font-sm);
+  color: var(--lx-text-secondary);
+  letter-spacing: 1px;
+}
+
 .login-extra {
   display: flex;
   justify-content: center;
-  margin-top: -8px;
-}
-.login-hint {
-  margin-top: 12px;
-  font-size: 12px;
-  color: #909399;
-  text-align: center;
-  line-height: 1.6;
+  margin-top: calc(-1 * var(--lx-space-2));
 }
 </style>

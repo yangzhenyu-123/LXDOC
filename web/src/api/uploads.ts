@@ -13,6 +13,7 @@ export interface UploadDocumentResponse {
   categoryId: string;
   ownerType: DocumentOwnerType;
   ownerId: string | null;
+  isCollection?: boolean;
 }
 
 // 图片上传响应
@@ -21,15 +22,18 @@ export interface UploadImageResponse {
   filename: string;
 }
 
+// 创建文档集响应（与上传文档响应同构）
+export type CreateCollectionResponse = UploadDocumentResponse;
+
 /**
- * 上传文档
- * POST /uploads，使用 FormData，字段名 'file' + 'categoryId'
- * - ownerType 默认 personal；group/department 时需提供 ownerId（组织节点 id）
+ * 上传单个文档
+ * POST /uploads，FormData：file + categoryId [+ ownerType + ownerId] [+ isCollection]
  */
 export function uploadDocument(
   file: File,
   categoryId: string,
   owner?: { type: DocumentOwnerType; id?: string | null },
+  isCollection = false,
 ): Promise<UploadDocumentResponse> {
   const form = new FormData();
   form.append('file', file);
@@ -40,12 +44,42 @@ export function uploadDocument(
       form.append('ownerId', owner.id);
     }
   }
+  if (isCollection) {
+    form.append('isCollection', 'true');
+  }
   return client.post<UploadDocumentResponse, UploadDocumentResponse>(
     '/uploads',
     form,
     {
       headers: { 'Content-Type': 'multipart/form-data' },
     },
+  );
+}
+
+/**
+ * 创建文档集（无文件，引用成员文档）
+ * POST /uploads/collection，body：{ title, categoryId, memberDocIds[], [ownerType], [ownerId] }
+ */
+export function createCollection(
+  title: string,
+  categoryId: string,
+  memberDocIds: string[],
+  owner?: { type: DocumentOwnerType; id?: string | null },
+): Promise<CreateCollectionResponse> {
+  const body: Record<string, unknown> = {
+    title,
+    categoryId,
+    memberDocIds,
+  };
+  if (owner?.type) {
+    body.ownerType = owner.type;
+    if (owner.type !== 'personal' && owner.id) {
+      body.ownerId = owner.id;
+    }
+  }
+  return client.post<CreateCollectionResponse, CreateCollectionResponse>(
+    '/uploads/collection',
+    body,
   );
 }
 

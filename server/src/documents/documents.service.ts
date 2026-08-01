@@ -15,6 +15,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { Document, DocumentFormat, DocumentOwnerType, ContentSource } from './document.entity';
 import { DocumentVersion } from './document-version.entity';
+import { DocumentFavorite } from './document-favorite.entity';
 import { Category } from '../categories/category.entity';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { getUploadDir } from '../config/upload.config';
@@ -24,6 +25,7 @@ import { PdfToolsService } from './pdf-tools.service';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 import { OptionalLlm } from '../llm/optional-llm.decorator';
 import { LlmService } from '../llm/llm.service';
+import { LlmConfigService } from '../llm/llm-config.service';
 import { llmConfig } from '../config/llm.config';
 import { kkfileviewConfig } from '../config/kkfileview.config';
 import { onlyofficeConfig } from '../config/onlyoffice.config';
@@ -57,8 +59,10 @@ export interface DocumentListItem {
   tags: string[];
   updatedAt: Date;
   createdBy: string | null;
+  createdByName?: string | null;
   ownerType: string;
   ownerId: string | null;
+  favorited?: boolean;
 }
 
 @Injectable()
@@ -70,10 +74,13 @@ export class DocumentsService {
     private readonly documentRepo: Repository<Document>,
     @InjectRepository(DocumentVersion)
     private readonly versionRepo: Repository<DocumentVersion>,
+    @InjectRepository(DocumentFavorite)
+    private readonly favoriteRepo: Repository<DocumentFavorite>,
     private readonly entityManager: EntityManager,
     private readonly accessControl: AccessControlService,
     private readonly filesService: FilesService,
     private readonly pdfTools: PdfToolsService,
+    private readonly llmConfigService: LlmConfigService,
     // LLM 可选注入：LlmModule 已导入时拿到 LlmService，未启用时为 undefined
     @OptionalLlm() private readonly llm?: LlmService,
   ) {}
@@ -122,8 +129,18 @@ export class DocumentsService {
 
     const fromFormat = doc.format === DocumentFormat.DOCX ? 'docx' : 'odt';
     let html = '';
+    // 创建临时目录供 pandoc --extract-media 提取图片（ODT 的 Pictures/、DOCX 的 word/media/）
+    // 转换后需把图片复制到持久化目录 uploads/images/<docId>/，供 /api/files/:docId/image/:name 加载
+    const tmpMediaDir = await fs.mkdtemp(
+      path.join(getUploadDir(), 'cache', 'pandoc-media-'),
+    );
     try {
-      html = await this.runPandocToHtml(fromFormat, absPath);
+      html = await this.runPandocToHtml(fromFormat, absPath, tmpMediaDir);
+      // 将提取的图片扁平化复制到 uploads/images/<docId>/（去掉 Pictures/ 等中间目录层，
+      // 使 /api/files/:docId/image/:name 路由能直接匹配纯文件名）
+      const imagesDir = path.join(getUploadDir(), 'images', id);
+      await fs.mkdir(imagesDir, { recursive: true });
+      await this.copyMediaFiles(tmpMediaDir, imagesDir);
     } catch (err) {
       // 已是 Nest 异常则原样抛出
       if (
@@ -135,17 +152,23 @@ export class DocumentsService {
       throw new InternalServerErrorException(
         `Pandoc 转 HTML 失败：${(err as Error).message}`,
       );
+    } finally {
+      // 清理临时提取目录
+      await fs.rm(tmpMediaDir, { recursive: true, force: true }).catch(() => {});
     }
 
     // 签发短期文件 token（读权限已在 findOne 中断言通过）
     const fileToken = this.filesService.signFileToken(id, user.id);
 
-    // 改写图片 src：./media/xxx / media/xxx / images/xxx → /api/files/<docId>/image/<name>?token=
-    // 仅匹配相对路径（media/ 或 images/ 前缀），跳过 http(s)/data 等外链，避免误替换
+    // 改写图片 src：pandoc --extract-media 输出绝对路径 <tmpdir>/Pictures/xxx.png 或 <tmpdir>/media/xxx.png，
+    // 匹配 media|images|Pictures 前缀路径，取 basename 作为文件名，改写为鉴权 URL
+    // （同时兼容不加 --extract-media 时的相对路径 media/xxx.png、images/xxx.png）
     html = html.replace(
-      /src=["']\.?\/?(?:media\/|images\/)([^"']+)["']/g,
-      (_match, name: string) =>
-        `src="/api/files/${id}/image/${encodeURIComponent(name)}?token=${fileToken}"`,
+      /src=["'](?:[^"']*[\/\\])?(?:media|images|Pictures)[\/\\]([^"']+)["']/g,
+      (_match, name: string) => {
+        const filename = path.basename(name);
+        return `src="/api/files/${id}/image/${encodeURIComponent(filename)}?token=${fileToken}"`;
+      },
     );
 
     return html;
@@ -203,8 +226,14 @@ export class DocumentsService {
     const fileToken = this.filesService.signFileToken(id, user.id);
     // kkFileView 容器通过 backendPublicUrl 拉取文件（与 OnlyOffice 回调同一地址）
     const fileDownloadUrl = `${onlyofficeConfig.backendPublicUrl}/api/files/${id}/original?token=${encodeURIComponent(fileToken)}`;
+    // kkFileView 5.1.0 从 URL 路径推断文件后缀，但 /api/files/:id/original 路径无文件名，
+    // 需附 fullfilename 参数让 kkfileview 据此判断类型，否则 StringIndexOutOfBoundsException
+    // 文件名用 doc.title + 扩展名（仅用于类型识别，不影响实际下载内容）
+    const safeTitle = (doc.title ?? 'document').replace(/[\\/:*?"<>|]/g, '_');
+    const fullFileName = `${safeTitle}.${doc.format}`;
+    const fileUrlWithHint = `${fileDownloadUrl}&fullfilename=${encodeURIComponent(fullFileName)}`;
     // kkFileView 约定 ?url= 参数为 base64 编码的文件 URL
-    const encoded = Buffer.from(fileDownloadUrl).toString('base64');
+    const encoded = Buffer.from(fileUrlWithHint).toString('base64');
     return `${kkfileviewConfig.publicUrl}/onlinePreview?url=${encodeURIComponent(encoded)}`;
   }
 
@@ -290,10 +319,16 @@ export class DocumentsService {
   async summarize(id: string, user: AuthUser): Promise<Document> {
     const doc = await this.findOne(id, user);
 
-    // LLM 未启用时明确报错（而非降级返回 null）
-    if (!this.llm || !this.llm.isReady()) {
+    // 解析当前用户生效的 LLM 配置：
+    // - 普通用户：返回自己配的；未配则 null（系统不提供默认）
+    // - admin：优先自己配的 → 回退系统配置 llm.*；都没有则 null
+    const userLlm = await this.llmConfigService.resolveForUser(user.id);
+
+    // 新架构：resolveForUser 返回 null 表示无任何可用配置（含 admin 系统配置也未配），
+    // 直接报错，不再回退全局 .env（普通用户不提供默认 API）
+    if (!userLlm) {
       throw new ServiceUnavailableException(
-        'AI 总结不可用：LLM 未启用或未就绪，请联系管理员配置 LLM_ENABLED 与 LLM_BASE_URL',
+        'AI 总结不可用：未配置 LLM。普通用户请在「个人设置」配置自己的 LLM；管理员请在「个人设置」或「系统配置」中配置。',
       );
     }
 
@@ -321,6 +356,8 @@ export class DocumentsService {
       temperature: 0.3, // 总结任务用较低温度保证稳定
       maxTokens: summaryPrompt.maxTokens,
       timeout: Math.max(llmConfig.timeout, 120_000), // 总结耗时较长，给 2 分钟
+      // 传入用户选择的 LLM 配置覆盖（未选时为 undefined，回退全局）
+      ...(userLlm ?? {}),
     });
 
     if (!result || !result.content?.trim()) {
@@ -330,6 +367,14 @@ export class DocumentsService {
     }
 
     const summaryMarkdown = result.content.trim();
+
+    // 独立调用 LLM 生成知识库分类路径（与总结分开，便于解析且不污染总结输出）
+    // 路径用于前端 AI 知识库树形导航，按文档主题归类
+    const knowledgePath = await this.generateKnowledgePath(
+      doc.title,
+      feedText,
+      userLlm,
+    );
 
     // 事务内创建总结文档与初始版本快照
     return this.entityManager.transaction(async (manager) => {
@@ -351,6 +396,7 @@ export class DocumentsService {
           doc.ownerType === DocumentOwnerType.PERSONAL ? user.id : doc.ownerId,
         contentSource: ContentSource.AI_SUMMARY,
         sourceDocId: doc.id,
+        knowledgePath,
       });
       const saved = await docRepo.save(newDoc);
       await versionRepo.save(
@@ -417,15 +463,86 @@ export class DocumentsService {
   }
 
   /**
+   * 调用 LLM 生成知识库分类路径
+   * 基于文档标题与内容，让模型输出一个层级路径（如 "技术文档/操作系统/Linux"）
+   * 用于前端 AI 知识库树形导航。失败时回退到"未分类"，不阻断总结流程。
+   */
+  private async generateKnowledgePath(
+    title: string,
+    feedText: string,
+    userLlm?: { baseUrl: string; apiKey: string; model: string; enableThinking: boolean } | null,
+  ): Promise<string> {
+    // 新架构：userLlm 为 null 表示无可用配置（含全局也未配），直接回退"未分类"
+    if (!userLlm) return '未分类';
+    try {
+      const system = [
+        '你是一名文档分类专家。请根据用户提供的文档标题与内容，',
+        '为其生成一个简洁的中文分类路径，用于知识库树形导航。',
+        '要求：',
+        '1. 路径用 / 分隔，2-4 级，每级 2-6 个汉字或英文词',
+        '2. 第一级从这些主题中选择：技术文档、解决方案、Bug分析、产品文档、培训资料、项目管理',
+        '3. 后续级别按文档具体主题细分',
+        '4. 只输出路径本身，不要引号、不要解释、不要换行',
+        '示例输出：技术文档/操作系统/Linux',
+      ].join('\n');
+      const userContent = `文档标题：${title}\n\n内容摘要（前 1500 字符）：\n${feedText.slice(0, 1500)}`;
+      const result = await this.llm.chat(
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: userContent },
+        ],
+        {
+          temperature: 0.1,
+          maxTokens: 128,
+          timeout: 30_000,
+          // 路径生成是简单分类任务，关闭推理直接输出，省 token 且快
+          enableThinking: userLlm?.enableThinking ?? false,
+          // 传入用户选择的 LLM 配置覆盖
+          ...(userLlm ? { baseUrl: userLlm.baseUrl, apiKey: userLlm.apiKey, model: userLlm.model } : {}),
+        },
+      );
+      const path = (result?.content ?? '').trim();
+      // 清理：取第一行（LLM 可能输出路径后跟解释），去引号/换行
+      const firstLine = path.split(/\r?\n/)[0] ?? '';
+      const cleaned = firstLine.replace(/["'`]/g, '').trim();
+      if (!cleaned) return '未分类';
+      // 截断过长输出（防止 LLM 输出整段解释），保留前 200 字符
+      const truncated = cleaned.slice(0, 200);
+      // 确保每段非空
+      const segs = truncated.split('/').map((s) => s.trim()).filter(Boolean);
+      if (segs.length === 0) return '未分类';
+      return segs.join('/');
+    } catch (err) {
+      this.logger.warn(
+        `生成知识库路径失败，回退到"未分类"：${(err as Error).message}`,
+      );
+      return '未分类';
+    }
+  }
+
+  /**
    * 调用 pandoc 将文档转换为 HTML 片段（不带 standalone）
    * 用 execFile 包装 Promise，超时 60s
    * pandoc 未安装时抛 InternalServerErrorException('Pandoc 未安装')
+   *
+   * @param fromFormat 源格式（docx / odt）
+   * @param filePath 源文件绝对路径
+   * @param mediaDir 可选，传入则添加 --extract-media=<mediaDir>，
+   *   pandoc 会把文档内嵌图片提取到该目录（ODT 的 Pictures/、DOCX 的 word/media/）
    */
-  private runPandocToHtml(fromFormat: string, filePath: string): Promise<string> {
+  private runPandocToHtml(
+    fromFormat: string,
+    filePath: string,
+    mediaDir?: string,
+  ): Promise<string> {
     return new Promise((resolve, reject) => {
+      const args = ['-f', fromFormat, '-t', 'html', filePath];
+      if (mediaDir) {
+        args.push(`--extract-media=${mediaDir}`);
+      }
       execFile(
         'pandoc',
-        ['-f', fromFormat, '-t', 'html', filePath],
+        args,
         { timeout: 60_000, maxBuffer: 10 * 1024 * 1024 },
         (err, stdout, stderr) => {
           if (err) {
@@ -447,6 +564,24 @@ export class DocumentsService {
         },
       );
     });
+  }
+
+  /**
+   * 递归复制 pandoc --extract-media 提取的图片文件到目标目录（扁平化，去掉子目录层）
+   * 例：srcDir/Pictures/xxx.png → destDir/xxx.png
+   * 同名文件后者覆盖前者（不同 ODT 的 Pictures/ 文件名唯一，冲突概率极低）
+   */
+  private async copyMediaFiles(srcDir: string, destDir: string): Promise<void> {
+    const entries = await fs.readdir(srcDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const srcPath = path.join(srcDir, entry.name);
+      if (entry.isDirectory()) {
+        // 子目录递归，但文件直接放 destDir（扁平化）
+        await this.copyMediaFiles(srcPath, destDir);
+      } else {
+        await fs.copyFile(srcPath, path.join(destDir, entry.name));
+      }
+    }
   }
 
   /**
@@ -716,6 +851,42 @@ export class DocumentsService {
   }
 
   /**
+   * 列出所有 AI 总结文档（contentSource=ai_summary），返回扁平列表含 knowledgePath
+   * 前端按 knowledgePath 构建知识库树形导航。按 updatedAt DESC 排序。
+   * 按当前用户读权限过滤可见范围。
+   */
+  async findKnowledgeTree(user: AuthUser): Promise<
+    {
+      id: string;
+      title: string;
+      knowledgePath: string;
+      format: string;
+      updatedAt: Date;
+    }[]
+  > {
+    const qb = this.documentRepo
+      .createQueryBuilder('d')
+      .select([
+        'd.id',
+        'd.title',
+        'd.knowledgePath',
+        'd.format',
+        'd.updatedAt',
+      ])
+      .where('d.content_source = :src', { src: ContentSource.AI_SUMMARY })
+      .orderBy('d.updatedAt', 'DESC');
+    this.accessControl.applyReadScopeToQb(qb, user);
+    const docs = await qb.getMany();
+    return docs.map((d) => ({
+      id: d.id,
+      title: d.title,
+      knowledgePath: d.knowledgePath ?? '未分类',
+      format: d.format,
+      updatedAt: d.updatedAt,
+    }));
+  }
+
+  /**
    * 列出某分类下的所有文档（不含 content）
    * 若 includeChildren=true，递归包含所有子分类下的文档
    * 按当前用户读权限过滤可见范围
@@ -799,5 +970,182 @@ export class DocumentsService {
       }
     }
     return result;
+  }
+
+  // ============================================================
+  // 收藏 / 快捷入口 / 标签聚合（方案 A 增量增强）
+  // ============================================================
+
+  /**
+   * 切换收藏状态（已收藏则取消，未收藏则添加）
+   * 不校验文档存在性（外键约束兜底），重复收藏由唯一约束兜底
+   */
+  async toggleFavorite(
+    docId: string,
+    user: AuthUser,
+  ): Promise<{ favorited: boolean }> {
+    const existing = await this.favoriteRepo.findOne({
+      where: { userId: user.id, documentId: docId },
+    });
+    if (existing) {
+      await this.favoriteRepo.remove(existing);
+      return { favorited: false };
+    }
+    await this.favoriteRepo.save(
+      this.favoriteRepo.create({ userId: user.id, documentId: docId }),
+    );
+    return { favorited: true };
+  }
+
+  /**
+   * 查询某用户是否收藏了某文档（供文档详情页显示星标状态）
+   */
+  async isFavorited(docId: string, user: AuthUser): Promise<boolean> {
+    const existing = await this.favoriteRepo.findOne({
+      where: { userId: user.id, documentId: docId },
+    });
+    return !!existing;
+  }
+
+  /**
+   * 批量查询某用户收藏的文档 id 集合（供列表页标记星标）
+   */
+  private async getFavoritedIds(
+    docIds: string[],
+    userId: string,
+  ): Promise<Set<string>> {
+    if (docIds.length === 0) return new Set();
+    const rows = await this.favoriteRepo
+      .createQueryBuilder('f')
+      .select(['f.documentId'])
+      .where('f.userId = :uid AND f.documentId IN (:...ids)', {
+        uid: userId,
+        ids: docIds,
+      })
+      .getRawMany();
+    return new Set(rows.map((r) => r.document_id));
+  }
+
+  /**
+   * 批量查 User 表，返回 userId → username 映射（供列表展示创建者名）
+   */
+  private async getUserNames(
+    userIds: (string | null)[],
+  ): Promise<Map<string, string>> {
+    const ids = Array.from(
+      new Set(userIds.filter((x): x is string => !!x)),
+    );
+    if (ids.length === 0) return new Map();
+    const userRepo = this.entityManager.getRepository('User');
+    const users = await userRepo
+      .createQueryBuilder('u')
+      .select(['u.id', 'u.username'])
+      .where('u.id IN (:...ids)', { ids })
+      .getRawMany();
+    return new Map(users.map((u) => [u.id, u.username]));
+  }
+
+  /**
+   * 把 Document 实体列表映射为 DocumentListItem，附加创建者名 + 收藏状态
+   */
+  private async toListItems(
+    docs: Document[],
+    user: AuthUser,
+  ): Promise<DocumentListItem[]> {
+    const userIds = docs.map((d) => d.createdBy);
+    const [nameMap, favIds] = await Promise.all([
+      this.getUserNames(userIds),
+      this.getFavoritedIds(
+        docs.map((d) => d.id),
+        user.id,
+      ),
+    ]);
+    return docs.map((d) => ({
+      id: d.id,
+      title: d.title,
+      format: d.format,
+      version: d.version,
+      tags: d.tags ?? [],
+      updatedAt: d.updatedAt,
+      createdBy: d.createdBy,
+      createdByName: d.createdBy ? nameMap.get(d.createdBy) ?? null : null,
+      ownerType: d.ownerType,
+      ownerId: d.ownerId,
+      favorited: favIds.has(d.id),
+    }));
+  }
+
+  /**
+   * 我的文档：当前用户创建的所有文档（按 updatedAt DESC）
+   */
+  async findMyDocuments(user: AuthUser): Promise<DocumentListItem[]> {
+    const qb = this.documentRepo
+      .createQueryBuilder('d')
+      .where('d.created_by = :uid', { uid: user.id })
+      .orderBy('d.updatedAt', 'DESC');
+    // 我的文档天然在用户读权限范围内（个人创建），无需再 applyReadScopeToQb
+    const docs = await qb.getMany();
+    return this.toListItems(docs, user);
+  }
+
+  /**
+   * 我的收藏：当前用户收藏的文档（按收藏时间 DESC）
+   */
+  async findFavorites(user: AuthUser): Promise<DocumentListItem[]> {
+    const qb = this.documentRepo
+      .createQueryBuilder('d')
+      .innerJoin(
+        DocumentFavorite,
+        'f',
+        'f.documentId = d.id AND f.userId = :uid',
+        { uid: user.id },
+      )
+      .orderBy('f.createdAt', 'DESC');
+    this.accessControl.applyReadScopeToQb(qb, user);
+    const docs = await qb.getMany();
+    return this.toListItems(docs, user);
+  }
+
+  /**
+   * 我的组文档：当前用户所在组织（含祖先链）下的文档
+   * 用于"我的组/我的部门"快捷入口
+   */
+  async findMyOrgDocuments(user: AuthUser): Promise<DocumentListItem[]> {
+    const ancestorIds = this.accessControl.ancestorOrgIds(user);
+    if (ancestorIds.length === 0) {
+      return [];
+    }
+    const qb = this.documentRepo
+      .createQueryBuilder('d')
+      .where(
+        'd.ownerType IN (:...types) AND d.ownerId IN (:...orgIds)',
+        {
+          types: [DocumentOwnerType.GROUP, DocumentOwnerType.DEPARTMENT],
+          orgIds: ancestorIds,
+        },
+      )
+      .orderBy('d.updatedAt', 'DESC');
+    const docs = await qb.getMany();
+    return this.toListItems(docs, user);
+  }
+
+  /**
+   * 标签聚合：返回所有文档中出现的标签及其文档计数（按计数 DESC）
+   * 用于"标签云"快捷入口，跨分类横切检索
+   */
+  async getTagsWithCount(user: AuthUser): Promise<{ tag: string; count: number }[]> {
+    // unnest tags 数组为行，按读权限过滤后聚合计数
+    const qb = this.documentRepo
+      .createQueryBuilder('d')
+      .select(['unnest(d.tags) AS tag', 'COUNT(*) AS count'])
+      .groupBy('tag')
+      .orderBy('count', 'DESC')
+      .addOrderBy('tag', 'ASC');
+    this.accessControl.applyReadScopeToQb(qb, user);
+    const rows = await qb.getRawMany();
+    return rows.map((r) => ({
+      tag: r.tag,
+      count: Number(r.count),
+    }));
   }
 }

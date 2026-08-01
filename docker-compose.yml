@@ -32,9 +32,10 @@ services:
     # 资源限制，防止单容器耗尽主机资源
     mem_limit: 1g
     cpus: 2
-    # 仅接入 internal 网络，frontend 无法直连 DB
+    # docker 18.09 容器创建时不支持多网络连接，所有服务统一接入 default 网络；
+    # postgres 不对外暴露端口（上方 ports 注释），仅 compose 内网可达，隔离由不映射端口保证
     networks:
-      - internal
+      - default
 
   # 后端 NestJS 服务
   backend:
@@ -117,10 +118,10 @@ services:
     # LibreOffice/pdf 转换是内存大户，限制资源避免 OOM 影响其他服务
     mem_limit: 2g
     cpus: 2
-    # 同时接入 default（供 frontend 反代访问）与 internal（访问 postgres）
+    # docker 18.09 容器创建时不支持多网络连接，统一接入 default 网络；
+    # postgres/onlyoffice/pdf2html/docling 均在 default，backend 可直接访问
     networks:
       - default
-      - internal
 
   # OnlyOffice Document Server（docx/odt 原格式编辑）
   # AGPL 许可，仅自用/内部部署合规；商业发行需购买商业版
@@ -137,9 +138,7 @@ services:
       # 持久化文档转换缓存与字体
       - onlyoffice-data:/var/www/onlyoffice/Data
       - onlyoffice-cache:/var/lib/onlyoffice
-    # 生产环境经 nginx 反代，不直接暴露
-    # ports:
-    #   - "8081:80"
+    # OnlyOffice 仅内网暴露，经前端 nginx /onlyoffice 反代访问
     expose:
       - "80"
     restart: unless-stopped
@@ -149,13 +148,28 @@ services:
   # kkFileView 统一预览服务（100+ 格式开箱即用，仅 compose 内网，经 nginx 反代 /kkview）
   # 内置 LibreOffice，作为 docx/odt/pdf 等保真预览的统一入口，替代 pandoc/pdf2htmlEX 预览降级链路
   kkfileview:
-    image: keking/kkfileview:4.4.0
+    # kkFileView 5.1.0（wangbowen 镜像，内置 LibreOffice + JDK21，5.0 起默认 context-path 为 /）
+    # 4.x 镜像内置 LibreOffice 持续 exit 81 崩溃；5.1.0 修复且 LibreOffice Connected 成功
+    image: keking/kkfileview:5.1.0
     container_name: lxdoc-kkfileview
     environment:
-      # kkFileView 拉取文件需访问后端，通过 host 服务名解析（同 default 网络）
-      KK_CONTEXT_PATH: /onlinePreview
+      # context-path 设为 /kkview，使预览完整路径为 /kkview/onlinePreview，
+      # nginx 透传完整 URI（proxy_pass 不带尾斜杠），kkfileview 内部重定向天然含 /kkview 前缀
+      KK_CONTEXT_PATH: /kkview
+      # 5.1.0 新增 TrustHostFilter：kkfileview 拉取文件时校验文件 URL 的 host 是否在信任列表，
+      # 后端 fileUrl 为 http://backend:3000/...，需将 backend 加入信任主机，否则返回 403
+      # 设为 * 允许所有主机（内网部署，安全风险可控）
+      KK_TRUST_HOST: "*"
     expose:
       - "8012"
+    healthcheck:
+      # kkFileView 5.x 镜像内置 wget；context-path 为 /kkview，根路径返回演示页 200
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8012/kkview/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # Spring Boot + LibreOffice 初始化较慢，给 90s 启动窗口
+      start_period: 90s
     # 软依赖：后端不强制等待，kkFileView 未就绪时预览接口返回 503，前端回退
     restart: unless-stopped
     mem_limit: 2g
@@ -205,21 +219,24 @@ services:
     restart: unless-stopped
     mem_limit: 4g
     cpus: 2
+    # docker 18.09 单网络兼容：统一接入 default，不对外暴露（expose 而非 ports）
     networks:
-      - internal
+      - default
 
   # 前端 nginx 服务
   frontend:
     image: ${LXDOC_IMAGE_PREFIX:-ghcr.io/yangzhenyu-123}/lxdoc-frontend:${LXDOC_IMAGE_TAG:-latest}
     build:
-      context: ./web
-      dockerfile: ../docker/Dockerfile.frontend
-      # 注入 docker 目录为命名上下文，供 Dockerfile COPY --from=docker nginx.conf 使用
-      additional_contexts:
-        docker: ./docker
+      # 构建上下文为项目根，使 Dockerfile 能同时访问 web/（源码）与 docker/（nginx.conf），
+      # 避免使用 additional_contexts（依赖 BuildKit，docker 18.09 经典 builder 不支持）
+      context: .
+      dockerfile: docker/Dockerfile.frontend
     container_name: lxdoc-frontend
     depends_on:
       backend:
+        condition: service_healthy
+      # kkfileview 必须先启动，否则 nginx 启动时无法解析 upstream 主机名
+      kkfileview:
         condition: service_healthy
     ports:
       - "8080:80"
@@ -234,12 +251,43 @@ services:
     mem_limit: 512m
     cpus: 1
 
+  # 备份服务：cron 定时 pg_dump 数据库 + tar 打包 uploads，归档到宿主机 ./backups
+  # 恢复：docker-compose exec backup /usr/local/bin/restore.sh list
+  backup:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backup
+    container_name: lxdoc-backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-lxdoc}
+      DB_PASS: ${POSTGRES_PASSWORD:?必须在 .env 中设置数据库密码}
+      DB_NAME: ${POSTGRES_DB:-lxdoc}
+      UPLOADS_DIR: /app/uploads
+      BACKUP_DIR: /backups
+      BACKUP_CRON: ${BACKUP_CRON:-0 2 * * *}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+    volumes:
+      # 复用 backend 的 uploads 挂载（只读即可，备份不需写）
+      - ./uploads:/app/uploads:ro
+      # 备份归档到宿主机，便于外部存储同步
+      - ./backups:/backups
+    # 不对外暴露端口，仅 compose 内网访问 postgres
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 1
+    networks:
+      - default
+
 networks:
-  # default 网络：对外服务（frontend）+ 需被 frontend 访问的后端
+  # default 网络：所有服务统一接入。
+  # docker 18.09 容器创建时不支持多网络连接，故合并为单网络；
+  # 服务间隔离通过不对外暴露端口实现（postgres/onlyoffice/backend 默认不映射端口）。
   default:
-  # internal 网络：仅内部服务互通，不对外；postgres 仅接入此网，frontend 无法直连
-  internal:
-    internal: true
 
 volumes:
   postgres-data:

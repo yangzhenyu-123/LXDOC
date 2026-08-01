@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import {
   createCategory,
   deleteCategory,
   getCategoriesTree,
   updateCategory,
+  CategoryTypes,
   type Category,
 } from '@/api/categories';
 
@@ -30,6 +31,38 @@ const createDialog = reactive({
   parentId: '' as string | null,
   name: '',
 });
+
+// 新建顶层分类对话框状态
+const createTopDialog = reactive({
+  visible: false,
+  name: '',
+  type: '',
+  sort: 0,
+});
+
+// 已知类型选项（用于建议/下拉）
+const knownTypes = computed(() => Object.values(CategoryTypes));
+
+// 分类类型 → 前缀图标名（与 HomeView 风格一致，用于 el-tree 节点）
+const typeIconMap: Record<string, string> = {
+  tech_doc: 'Files',
+  solution: 'MagicStick',
+  bug_report: 'Warning',
+  regulation: 'Document',
+  dept_public: 'OfficeBuilding',
+  key_project: 'Flag',
+  os_knowledge: 'Monitor',
+  training: 'Reading',
+  eng_issues: 'Tools',
+  key_bug: 'CircleClose',
+  newcomer: 'User',
+};
+const defaultIcon = 'Folder';
+
+// 节点图标：根据 type 返回对应图标名
+function nodeIcon(type: string | null | undefined): string {
+  return type ? typeIconMap[type] ?? defaultIcon : defaultIcon;
+}
 
 // 重命名对话框状态
 const renameDialog = reactive({
@@ -106,6 +139,37 @@ async function submitCreate() {
   }
 }
 
+// 打开新建顶层分类对话框
+function openCreateTopDialog() {
+  createTopDialog.name = '';
+  createTopDialog.type = '';
+  createTopDialog.sort = 0;
+  createTopDialog.visible = true;
+}
+
+// 提交新建顶层分类
+async function submitCreateTop() {
+  const name = createTopDialog.name.trim();
+  const type = createTopDialog.type.trim();
+  if (!name) {
+    ElMessage.warning('请输入分类名称');
+    return;
+  }
+  if (!type) {
+    ElMessage.warning('请输入分类类型标识（如 tech_doc / regulation）');
+    return;
+  }
+  try {
+    await createCategory({ parentId: null, name, type, sort: createTopDialog.sort || 0 });
+    ElMessage.success('创建成功');
+    createTopDialog.visible = false;
+    await loadTree();
+  } catch (err: any) {
+    const msg = err?.response?.data?.message ?? err?.message ?? '未知错误';
+    ElMessage.error(`创建失败：${msg}`);
+  }
+}
+
 // 打开重命名对话框
 function openRenameDialog() {
   if (!contextMenu.node) return;
@@ -170,6 +234,11 @@ function onNodeClick(data: Category) {
 
 <template>
   <div class="category-tree">
+    <div class="tree-toolbar">
+      <el-button size="small" type="primary" @click="openCreateTopDialog">
+        <el-icon><Plus /></el-icon> 新建顶层分类
+      </el-button>
+    </div>
     <el-tree
       :data="treeData"
       :props="treeProps"
@@ -178,7 +247,17 @@ function onNodeClick(data: Category) {
       default-expand-all
       @node-contextmenu="onNodeContextmenu"
       @node-click="onNodeClick"
-    />
+    >
+      <!-- 自定义节点：前缀图标 + 名称 -->
+      <template #default="{ data }">
+        <span class="tree-node">
+          <el-icon class="tree-node-icon" :class="{ 'is-top': !data.parentId }">
+            <component :is="nodeIcon(data.type)" />
+          </el-icon>
+          <span class="tree-node-label">{{ data.name }}</span>
+        </span>
+      </template>
+    </el-tree>
 
     <!-- 右键菜单 -->
     <div
@@ -209,6 +288,49 @@ function onNodeClick(data: Category) {
       </template>
     </el-dialog>
 
+    <!-- 新建顶层分类对话框 -->
+    <el-dialog v-model="createTopDialog.visible" title="新建顶层分类" width="480px">
+      <el-form label-width="90px">
+        <el-form-item label="名称">
+          <el-input
+            v-model="createTopDialog.name"
+            placeholder="请输入分类名称（如：会议纪要）"
+            maxlength="100"
+            show-word-limit
+          />
+        </el-form-item>
+        <el-form-item label="类型标识">
+          <el-input
+            v-model="createTopDialog.type"
+            placeholder="英文标识，如 meeting_minutes"
+            maxlength="50"
+          />
+          <div class="type-hint">
+            可从已知类型选择或自定义：
+            <el-select
+              v-model="createTopDialog.type"
+              placeholder="选择或自定义"
+              filterable
+              allow-create
+              default-first-option
+              size="small"
+              class="type-select"
+            >
+              <el-option v-for="t in knownTypes" :key="t" :label="t" :value="t" />
+            </el-select>
+          </div>
+        </el-form-item>
+        <el-form-item label="排序值">
+          <el-input-number v-model="createTopDialog.sort" :min="0" :controls="false" />
+          <span class="sort-hint">数字越小越靠前</span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createTopDialog.visible = false">取消</el-button>
+        <el-button type="primary" @click="submitCreateTop">创建</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 重命名对话框 -->
     <el-dialog v-model="renameDialog.visible" title="重命名分类" width="420px">
       <el-form label-width="80px">
@@ -234,35 +356,99 @@ function onNodeClick(data: Category) {
   position: relative;
   height: 100%;
   overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.tree-toolbar {
+  padding: var(--lx-space-2) var(--lx-space-3);
+  border-bottom: 1px solid var(--lx-border-light);
+}
+
+/* el-tree 节点行高/字号优化：默认 26px 偏挤，调大让字体更舒展 */
+.category-tree :deep(.el-tree-node__content) {
+  height: 36px;
+  line-height: 36px;
+}
+.category-tree :deep(.el-tree-node__label) {
+  font-size: var(--lx-font-base);
+}
+/* 顶层分类（一级节点）字号加大 + 加粗，层级更分明 */
+.category-tree :deep(.el-tree > .el-tree-node > .el-tree-node__content > .el-tree-node__label) {
+  font-size: var(--lx-font-md);
+  font-weight: var(--lx-font-semibold);
+}
+/* 顶层节点图标也相应放大 */
+.category-tree :deep(.el-tree > .el-tree-node > .el-tree-node__content .tree-node-icon) {
+  font-size: 16px;
+}
+
+/* 自定义树节点：前缀图标 + 名称 */
+.tree-node {
+  display: flex;
+  align-items: center;
+  gap: var(--lx-space-2);
+  flex: 1;
+  min-width: 0;
+}
+.tree-node-icon {
+  color: var(--lx-text-placeholder);
+  flex-shrink: 0;
+}
+/* 顶层分类图标用主色，子分类保持灰色 */
+.tree-node-icon.is-top {
+  color: var(--lx-primary);
+}
+.tree-node-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.type-hint {
+  margin-top: var(--lx-space-2);
+  font-size: var(--lx-font-xs);
+  color: var(--lx-text-placeholder);
+  display: flex;
+  align-items: center;
+  gap: var(--lx-space-2);
+  flex-wrap: wrap;
+}
+.type-select {
+  width: 200px;
+}
+.sort-hint {
+  margin-left: var(--lx-space-2);
+  font-size: var(--lx-font-xs);
+  color: var(--lx-text-placeholder);
 }
 
 .context-menu {
   position: fixed;
   z-index: 3000;
   min-width: 140px;
-  padding: 4px 0;
-  background: #fff;
-  border: 1px solid #e4e7ed;
-  border-radius: 4px;
-  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+  padding: var(--lx-space-1) 0;
+  background: var(--lx-bg-elevated);
+  border: 1px solid var(--lx-border);
+  border-radius: var(--lx-radius-md);
+  box-shadow: var(--lx-shadow-lg);
 }
 
 .menu-item {
-  padding: 8px 16px;
-  font-size: 14px;
-  color: #303133;
+  padding: var(--lx-space-2) var(--lx-space-4);
+  font-size: var(--lx-font-base);
+  color: var(--lx-text-regular);
   cursor: pointer;
 }
 
 .menu-item:hover {
-  background: #f5f7fa;
+  background: var(--lx-primary-50);
 }
 
 .menu-item.danger {
-  color: #f56c6c;
+  color: var(--lx-danger);
 }
 
 .menu-item.danger:hover {
-  background: #fef0f0;
+  background: var(--lx-danger-bg);
 }
 </style>

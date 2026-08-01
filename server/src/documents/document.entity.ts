@@ -9,6 +9,18 @@ import {
 
 /**
  * 文档格式枚举
+ *
+ * 主文档格式（含 kkFileView 支持的 office 类格式，正文不可解析的格式 content 为空，
+ * 仅通过 kkFileView 预览）：
+ * - 可解析正文：md / txt / docx / odt / pdf（走 docling/pandoc/pdf-parse）
+ * - 仅预览：doc / xls / xlsx / ppt / pptx / csv / tsv / wps / dps / et / ett / wpt
+ *           ods / odp / ott / fodt / fods
+ * - 版式/富文本：ofd / rtf
+ * - Office 宏/模板：xlsm / dotm / xlt / xltm / dot / xlam / dotx / xla / pptm
+ * - OpenOffice 模板：ots / otp / six
+ *
+ * 注：Visio/CAD/3D模型/音视频/压缩包等纯预览型格式不作为主文档（无文档语义），
+ *     仅作为附件上传（附件白名单覆盖 kkFileView 全格式，不经过此 enum）。
  */
 export enum DocumentFormat {
   MD = 'md',
@@ -16,6 +28,40 @@ export enum DocumentFormat {
   DOCX = 'docx',
   ODT = 'odt',
   PDF = 'pdf',
+  DOC = 'doc',
+  XLS = 'xls',
+  XLSX = 'xlsx',
+  PPT = 'ppt',
+  PPTX = 'pptx',
+  CSV = 'csv',
+  TSV = 'tsv',
+  WPS = 'wps',
+  DPS = 'dps',
+  ET = 'et',
+  ETT = 'ett',
+  WPT = 'wpt',
+  ODS = 'ods',
+  ODP = 'odp',
+  OTT = 'ott',
+  FODT = 'fodt',
+  FODS = 'fods',
+  // 版式/富文本
+  OFD = 'ofd',
+  RTF = 'rtf',
+  // Office 宏/模板
+  XLSM = 'xlsm',
+  DOTM = 'dotm',
+  XLT = 'xlt',
+  XLTM = 'xltm',
+  DOT = 'dot',
+  XLAM = 'xlam',
+  DOTX = 'dotx',
+  XLA = 'xla',
+  PPTM = 'pptm',
+  // OpenOffice 模板
+  OTS = 'ots',
+  OTP = 'otp',
+  SIX = 'six',
 }
 
 /**
@@ -50,8 +96,9 @@ export enum ContentSource {
 
 /**
  * 文档实体
- * title/content 上加普通 B-tree 索引（用于精确查询）
- * GIN trigram 索引在 AppModule.onApplicationBootstrap 中通过原始 SQL 创建
+ * title 上加普通 B-tree 索引（用于精确查询/排序）
+ * content 为全文 text，B-tree 索引行有 8191 字节上限，长文档会超限报错；
+ * 故 content 不建 B-tree，全文搜索走 GIN trigram 索引（AppModule.onApplicationBootstrap 原始 SQL 创建）
  */
 @Entity('documents')
 export class Document {
@@ -66,7 +113,8 @@ export class Document {
   @Column({ type: 'varchar', length: 200 })
   title: string;
 
-  @Index()
+  // content 不加 @Index()：B-tree 索引行有 8191 字节上限，长文档超限会报错；
+  // 全文搜索由 GIN trigram 索引（idx_documents_content_trgm）覆盖
   @Column({ type: 'text', nullable: true })
   content: string | null;
 
@@ -124,6 +172,20 @@ export class Document {
   @Index()
   @Column({ name: 'source_doc_id', type: 'uuid', nullable: true })
   sourceDocId: string | null;
+
+  // 知识库路径（仅 AI 总结文档有值）：由 LLM 在 summarize 时根据原文档内容生成的分类路径，
+  // 格式如 "技术文档/操作系统/Linux"。前端按此字段构建 AI 知识库树形导航。
+  // 普通文档为 null。可手动编辑修正。
+  @Index()
+  @Column({ name: 'knowledge_path', type: 'varchar', length: 500, nullable: true })
+  knowledgePath: string | null;
+
+  // 是否为文档集合（容器文档）：true 表示此文档是一个"文档集"，
+  // 自身无正文 content，通过 document_attachments 表关联多个成员文档（引用方式）。
+  // 集合级附件也通过 document_attachments 表关联（attach_type='file'）。
+  // 普通文档为 false。
+  @Column({ name: 'is_collection', type: 'boolean', default: false })
+  isCollection: boolean;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

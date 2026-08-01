@@ -4,8 +4,9 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import * as pdfjsLib from 'pdfjs-dist';
 
 // 设置 worker：Vite 项目用 new URL 形式，构建时会单独打包 worker chunk
+// 注意：pdfjs-dist v3 的 worker 文件为 .js（v4 改为 .mjs），降级到 v3 需对应调整
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
+  'pdfjs-dist/build/pdf.worker.min.js',
   import.meta.url,
 ).href;
 
@@ -75,7 +76,13 @@ async function loadPdf() {
   loading.value = true;
   error.value = null;
   try {
-    pdfDoc = await pdfjsLib.getDocument(props.src).promise;
+    pdfDoc = await pdfjsLib.getDocument({
+      url: props.src,
+      // cMapUrl：pdfjs 按需加载 CID 字体映射表（中文/日文/韩文等非拉丁字体）
+      // 不配置时中文 PDF 渲染会丢字（文字消失）。cmaps 已由 Dockerfile 复制到 public/pdfjs-cmaps
+      cMapUrl: '/pdfjs-cmaps/',
+      cMapPacked: true,
+    }).promise;
     if (destroyed) {
       // 加载过程中组件已卸载，立即释放
       try {

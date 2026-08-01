@@ -12,13 +12,17 @@ erDiagram
     users ||--o{ organizations : "organization_id 所属"
     users ||--o{ documents : "created_by 创建"
     users ||--o{ documents : "owner_id 个人归属"
+    users ||--o{ document_favorites : "收藏"
     organizations ||--o{ documents : "owner_id 组/部门归属"
     organizations ||--o{ categories : "organization_id 归属"
     categories ||--o{ categories : "parent_id 自引用树"
     categories ||--o{ documents : "category_id"
     documents ||--o{ document_versions : "版本快照"
+    documents ||--o{ document_attachments : "主文档附件"
+    documents ||--o{ document_attachments : "被集合引用为成员"
     documents ||--o{ documents : "source_doc_id 总结反向追溯"
     users ||--o{ audit_logs : "user_id 操作者"
+    users ||--o{ system_settings : "updated_by 修改者"
 
     users {
         uuid id PK
@@ -28,6 +32,12 @@ erDiagram
         enum role "admin/editor/viewer"
         enum status "active/disabled"
         uuid organization_id FK "所属组织节点，admin 为 null"
+        varchar llm_base_url "用户级 LLM baseUrl 可空 长度 500"
+        varchar llm_api_key "用户级 LLM apiKey 可空 select:false 长度 200"
+        varchar llm_model "用户级 LLM 模型名 可空 长度 100"
+        boolean llm_enable_thinking "默认 true"
+        uuid llm_act_as_user_id "代理调用身份 可空 indexed"
+        uuid llm_config_id "旧表关联 可空 indexed"
         timestamptz created_at
         timestamptz updated_at
     }
@@ -67,7 +77,7 @@ erDiagram
         uuid category_id FK
         varchar title "GIN trigram"
         text content "GIN trigram 可空"
-        enum format "md/txt/docx/odt/pdf"
+        enum format "36 值 enum"
         varchar original_path "original/<docId>/<file> 可空"
         int pages "PDF 页数 可空"
         int version "默认 1"
@@ -76,8 +86,41 @@ erDiagram
         uuid created_by FK "实际创建人"
         enum owner_type "personal/group/department"
         uuid owner_id "personal=user.id；group/department=org.id"
-        enum content_source "manual/pandoc/pdf_text/onlyoffice/ai_summary"
+        enum content_source "manual/pandoc/pdf_text/onlyoffice/ai_summary/docling"
+        boolean is_collection "默认 false，true 表示文档集主文档"
+        varchar knowledge_path "AI 总结文档的分类路径 可空 长度 500"
         uuid source_doc_id FK "AI总结指向原文档 可空 indexed"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    document_attachments {
+        uuid id PK
+        uuid document_id FK "所属主文档 indexed"
+        enum attach_type "file/document"
+        varchar name "显示名（file=文件名，document=成员文档标题）"
+        varchar file_path "file 类型：attachments/<docId>/<file> 可空"
+        bigint file_size "file 类型：字节数 可空"
+        varchar file_ext "file 类型：扩展名 可空"
+        uuid linked_document_id FK "document 类型：引用的成员文档 可空 indexed"
+        int sort "默认 0，数字越小越靠前"
+        uuid created_by FK "上传者 可空 indexed"
+        timestamptz created_at
+    }
+
+    document_favorites {
+        uuid id PK
+        uuid user_id FK
+        uuid document_id FK
+        timestamptz created_at
+    }
+
+    system_settings {
+        varchar key PK "配置键 长度 100"
+        text value "配置值 可空"
+        varchar value_type "string/number/boolean 默认 string"
+        varchar description "描述 可空"
+        uuid updated_by FK "修改者 可空 indexed"
         timestamptz created_at
         timestamptz updated_at
     }
@@ -119,6 +162,12 @@ erDiagram
 | role | enum | NOT NULL default 'viewer' | admin / editor / viewer |
 | status | enum | NOT NULL default 'active' | active / disabled |
 | organization_id | uuid | nullable, indexed | 所属组织节点，全局 admin 为 null |
+| llm_base_url | varchar(500) | nullable | 用户级 LLM 服务地址，覆盖系统配置 |
+| llm_api_key | varchar(200) | nullable, select:false | 用户级 LLM apiKey，默认查询不返回 |
+| llm_model | varchar(100) | nullable | 用户级 LLM 模型名 |
+| llm_enable_thinking | boolean | default true | 是否启用思考模式（GLM-5.2 等推理模型可关闭以加速简单任务） |
+| llm_act_as_user_id | uuid | nullable, indexed | 代理调用时以该用户身份计费/限流（仅 admin 可设置） |
+| llm_config_id | uuid | nullable, indexed | 关联旧 `llm_configs` 表（向后兼容） |
 | created_at | timestamptz | | |
 | updated_at | timestamptz | | |
 
@@ -183,8 +232,8 @@ erDiagram
 | id | uuid PK | | |
 | category_id | uuid | NOT NULL, indexed | 所属分类 |
 | title | varchar(200) | NOT NULL, indexed | GIN trigram |
-| content | text | nullable, indexed | GIN trigram；docx 为 pandoc 抽取的索引文本，pdf 为全文 |
-| format | enum | NOT NULL | md / txt / docx / odt / pdf |
+| content | text | nullable, indexed | GIN trigram；md/txt/csv/tsv 为原文；docx 为 pandoc 抽取的索引文本；pdf 为 docling/pdf-parse 全文 |
+| format | enum | NOT NULL | 36 值：md/txt/csv/tsv/doc/docx/dot/dotm/dotx/odt/ott/rtf/wps/wpt/ofd/xls/xlsx/xlsm/xlt/xltm/xlam/ods/ots/fods/et/ett/ppt/pptx/pptm/odp/otp/dps/pdf |
 | original_path | varchar | nullable | 原文件相对路径 `original/<docId>/<file>` |
 | pages | int | nullable | PDF 页数 |
 | version | int | default 1 | 版本号，每次更新/回滚/OnlyOffice 保存 +1 |
@@ -193,7 +242,9 @@ erDiagram
 | created_by | uuid | nullable, indexed | 实际创建人（不变） |
 | owner_type | enum | default 'personal' | personal / group / department |
 | owner_id | uuid | nullable | personal→user.id；group/department→org.id |
-| content_source | enum | default 'manual' | manual / pandoc / pdf_text / onlyoffice / ai_summary |
+| content_source | enum | default 'manual' | manual / pandoc / pdf_text / onlyoffice / ai_summary / docling |
+| is_collection | boolean | default false | true 表示文档集主文档（无原文件，附件聚合成员） |
+| knowledge_path | varchar(500) | nullable, indexed | AI 总结文档的分类路径（slash 分隔，如 `技术文档/操作系统/Linux`，前端据此构建知识树） |
 | source_doc_id | uuid | nullable, indexed | AI 总结文档指向原文档的 id；普通文档为 null |
 | created_at | timestamptz | | |
 | updated_at | timestamptz | | |
@@ -201,6 +252,62 @@ erDiagram
 **owner 语义**：
 - `personal` + `owner_id = 创建者 id`：个人私有空间
 - `group` / `department` + `owner_id = organization.id`：归属组织节点
+
+**is_collection 语义**：
+- true 时该文档为「文档集主文档」，不存原文件，仅作聚合容器
+- 通过 `document_attachments`（attachType='document'）引用集合成员
+- 列出附件时，集合成员自动 union 集合主文档的 file 类型附件（共享附件）
+
+### document_attachments
+
+文档附件表（主文档挂附件 / 集合引用成员）。
+
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| id | uuid PK | default gen_random_uuid() | |
+| document_id | uuid | NOT NULL, indexed | 所属主文档 |
+| attach_type | varchar(20) | NOT NULL | file（落盘附件文件） / document（引用集合成员） |
+| name | varchar(200) | NOT NULL | 显示名（file 类型为文件名，document 类型为成员文档标题） |
+| file_path | varchar(500) | nullable | file 类型：`attachments/<docId>/<file>` 相对路径 |
+| file_size | bigint | nullable | file 类型：文件字节数 |
+| file_ext | varchar(20) | nullable | file 类型：扩展名（如 .zip .py） |
+| linked_document_id | uuid | nullable, indexed | document 类型：被引用为集合成员的文档 id |
+| sort | int | default 0 | 排序值，数字越小越靠前 |
+| created_by | uuid | nullable, indexed | 上传者 |
+| created_at | timestamptz | | |
+
+**索引**：`(document_id, sort)` 复合索引（用于按主文档列出并排序）；`linked_document_id` 单列索引（反查集合成员关系）。
+
+**约束**：无数据库层 UNIQUE 约束；「同一文档不能重复加入同一集合」由 `AttachmentsService.linkDocument` 在应用层校验（`if (exists) throw BadRequestException('该文档已是集合成员')`）。
+
+### document_favorites
+
+文档收藏关系表（user × document 多对多）。
+
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| id | uuid PK | | |
+| user_id | uuid | NOT NULL, indexed | 收藏者 |
+| document_id | uuid | NOT NULL, indexed | 被收藏文档 |
+| created_at | timestamptz | | |
+
+**约束**：`UNIQUE(user_id, document_id)`，同一用户对同一文档只能收藏一次。
+
+### system_settings
+
+系统配置覆盖表（admin 在线修改的运行时配置）。
+
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| key | varchar(100) PK | | 配置键（14 项可改配置，如 `llm.enabled` / `auth.allowSignup`） |
+| value | text | nullable | 配置值（按 value_type 解释） |
+| value_type | varchar(20) | default 'string' | string / number / boolean |
+| description | varchar(200) | nullable | 描述 |
+| updated_by | uuid | nullable, indexed | 修改者 user_id |
+| created_at | timestamptz | | |
+| updated_at | timestamptz | | |
+
+后端启动时读全表构建内存覆盖层（`settings-overrides.ts` Map），config getter 优先读覆盖层，无需重启立即生效。详见 [deployment.md#可在线修改的配置项](./deployment.md#可在线修改的配置项)。
 
 ### document_versions
 
@@ -258,6 +365,16 @@ erDiagram
 | documents | created_by | INDEX | 我的文档 |
 | documents | owner_type | INDEX | 权限过滤 |
 | documents | source_doc_id | INDEX | AI 总结反向追溯 |
+| documents | knowledge_path | INDEX | 知识树路径查询 |
+| document_attachments | document_id | INDEX | 列主文档附件 |
+| document_attachments | (document_id, sort) | INDEX | 按主文档列出并排序 |
+| document_attachments | linked_document_id | INDEX | 反查集合成员关系 |
+| document_attachments | created_by | INDEX | 按上传者筛选 |
+| document_favorites | user_id | INDEX | 用户收藏列表 |
+| document_favorites | document_id | INDEX | 文档收藏者 |
+| document_favorites | (user_id, document_id) | UNIQUE | 防重复收藏 |
+| system_settings | key | PK | 配置键 |
+| users | llm_config_id | INDEX | 旧 LLM 配置关联 |
 | audit_logs | user_id | INDEX | 按用户筛选 |
 | audit_logs | action | INDEX | 按动作筛选 |
 | audit_logs | created_at | INDEX | 按时间筛选 |
@@ -298,6 +415,9 @@ WHERE owner_type IS NULL OR owner_id IS NULL;
 UPDATE documents SET content_source = 'pdf_text' WHERE format = 'pdf' AND content_source = 'manual';
 UPDATE documents SET content_source = 'pandoc' WHERE format IN ('docx','odt') AND content_source = 'manual';
 
+-- 存量 Document 补 is_collection（默认 false）
+UPDATE documents SET is_collection = false WHERE is_collection IS NULL;
+
 -- 图片链接迁移到鉴权接口格式
 UPDATE documents
 SET content = REPLACE(content, '/uploads/images/', '/api/files/');
@@ -306,6 +426,7 @@ SET content = REPLACE(content, '/uploads/images/', '/api/files/');
 ## 生产环境建议
 
 - **关闭 synchronize**：`DB_SYNC=false`，用 TypeORM migration 管理 schema 变更
-- **备份**：定期 `pg_dump`，重点备份 `documents`、`document_versions`
+- **备份**：`backup` 容器 cron 执行 `pg_dump` + tar 打包 `uploads/`，详见 [deployment.md#备份与恢复](./deployment.md#备份与恢复)
 - **大文本**：`documents.content` 与 `document_versions.content` 为 text，大文档注意表膨胀，可考虑分区或归档历史版本
 - **连接池**：生产配置 `DB_POOL_MAX` 等参数
+- **附件清理**：删除文档时 best-effort 清理 `original/`、`images/`、`attachments/`、`cache/` 下的对应文件；删除 file 类型附件时同步清理磁盘文件

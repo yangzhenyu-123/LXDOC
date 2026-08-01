@@ -1,3 +1,5 @@
+import { getOverrideBool } from '../system/settings-overrides';
+
 /**
  * OnlyOffice Document Server 集成配置
  * - onlyofficeUrl：OnlyOffice Document Server 内部地址，后端用于拼装 fileUrl/callbackUrl
@@ -12,6 +14,8 @@
  *      此时 onlyofficePublicUrl 设为 /onlyoffice（同源，无需 CORS）
  *   3. OnlyOffice 容器回调后端走 http://backend:3000/api/...
  *      backendPublicUrl=http://backend:3000
+ *
+ * 覆盖层：enabled 支持在线修改（DB system_settings），其余项需编辑 .env 重启。
  */
 /** 不安全的默认密钥，生产环境禁止使用 */
 const INSECURE_DEFAULT_OO_SECRET = 'lxdoc-onlyoffice-dev-secret';
@@ -42,6 +46,7 @@ export const onlyofficeConfig = {
     process.env.BACKEND_PUBLIC_URL ?? 'http://localhost:3000',
   jwtSecret: configuredOoSecret,
   // 是否启用 OnlyOffice（false 时前端走 mammoth 降级）
-  enabled:
-    (process.env.ONLYOFFICE_ENABLED ?? 'true').toLowerCase() === 'true',
+  get enabled(): boolean {
+    return getOverrideBool('onlyoffice.enabled', (process.env.ONLYOFFICE_ENABLED ?? 'true').toLowerCase() === 'true');
+  },
 };

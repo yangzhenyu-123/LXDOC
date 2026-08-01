@@ -1,0 +1,169 @@
+/**
+ * LXDOC 全局基础样式
+ * - 重置 + 基础排版
+ * - Element Plus 主题变量覆盖（让 el-* 组件跟随 LXDOC 设计令牌）
+ * - 全局滚动条/选中态/超链接美化
+ */
+
+/* ====== 基础重置 ====== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: var(--lx-font-base);
+  color: var(--lx-text);
+  background: var(--lx-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: var(--lx-primary);
+  text-decoration: none;
+  transition: color var(--lx-transition-fast);
+}
+a:hover {
+  color: var(--lx-primary-600);
+}
+
+/* ====== 滚动条美化 ====== */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--lx-border-strong);
+  border-radius: var(--lx-radius-pill);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--lx-text-placeholder);
+}
+
+/* ====== 文本选中态 ====== */
+::selection {
+  background: var(--lx-primary-100);
+  color: var(--lx-primary-700);
+}
+
+/* ====== Element Plus 主题变量覆盖 ====== */
+:root {
+  /* 主色：Element Plus 用 --el-color-primary 系列 */
+  --el-color-primary: var(--lx-primary);
+  --el-color-primary-light-3: #818cf8;
+  --el-color-primary-light-5: #a5b4fc;
+  --el-color-primary-light-7: #c7d2fe;
+  --el-color-primary-light-8: #e0e7ff;
+  --el-color-primary-light-9: #eef2ff;
+  --el-color-primary-dark-2: var(--lx-primary-700);
+
+  /* 语义色 */
+  --el-color-success: var(--lx-success);
+  --el-color-warning: var(--lx-warning);
+  --el-color-danger: var(--lx-danger);
+  --el-color-info: var(--lx-info);
+
+  /* 文字 */
+  --el-text-color-primary: var(--lx-text);
+  --el-text-color-regular: var(--lx-text-regular);
+  --el-text-color-secondary: var(--lx-text-secondary);
+  --el-text-color-placeholder: var(--lx-text-placeholder);
+  --el-text-color-disabled: var(--lx-text-disabled);
+
+  /* 边框 */
+  --el-border-color: var(--lx-border);
+  --el-border-color-light: var(--lx-border-light);
+  --el-border-color-lighter: var(--lx-border-light);
+  --el-border-color-extra-light: var(--lx-border-light);
+  --el-border-color-dark: var(--lx-border-strong);
+
+  /* 填充 */
+  --el-fill-color: var(--lx-bg-subtle);
+  --el-fill-color-light: var(--lx-bg-subtle);
+  --el-fill-color-lighter: var(--lx-bg);
+  --el-fill-color-blank: var(--lx-bg-elevated);
+
+  /* 圆角 */
+  --el-border-radius-base: var(--lx-radius-sm);
+  --el-border-radius-small: var(--lx-radius-sm);
+  --el-border-radius-round: var(--lx-radius-pill);
+
+  /* 阴影 */
+  --el-box-shadow: var(--lx-shadow-md);
+  --el-box-shadow-light: var(--lx-shadow-sm);
+  --el-box-shadow-lighter: var(--lx-shadow-sm);
+  --el-box-shadow-dark: var(--lx-shadow-lg);
+}
+
+/* ====== Element Plus 组件细节美化 ====== */
+
+/* 按钮：主色按钮用品牌渐变 */
+.el-button--primary {
+  background: var(--lx-primary);
+  border-color: var(--lx-primary);
+}
+.el-button--primary:hover,
+.el-button--primary:focus {
+  background: var(--lx-primary-600);
+  border-color: var(--lx-primary-600);
+}
+.el-button--primary:active {
+  background: var(--lx-primary-700);
+  border-color: var(--lx-primary-700);
+}
+
+/* 输入框：聚焦时主色边框 + 柔和光晕 */
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15) inset !important;
+}
+
+/* 卡片：统一圆角 + 阴影 */
+.el-card {
+  border-radius: var(--lx-radius-lg);
+  border-color: var(--lx-border);
+  box-shadow: var(--lx-shadow-sm);
+}
+.el-card:hover {
+  box-shadow: var(--lx-shadow-md);
+}
+
+/* 对话框：圆角 + 阴影 */
+.el-dialog {
+  border-radius: var(--lx-radius-lg);
+  box-shadow: var(--lx-shadow-lg);
+}
+
+/* 消息提示：圆角 */
+.el-message {
+  border-radius: var(--lx-radius-md);
+}
+
+/* 表格：表头背景柔和 */
+.el-table th.el-table__cell {
+  background: var(--lx-bg-subtle) !important;
+  color: var(--lx-text-secondary);
+  font-weight: var(--lx-font-semibold);
+}
+
+/* 菜单：hover 用主色柔和背景 */
+.el-menu-item:hover,
+.el-menu-item:focus {
+  background: var(--lx-primary-50);
+}
+
+/* 标签：圆角胶囊 */
+.el-tag {
+  border-radius: var(--lx-radius-pill);
+}

@@ -55,7 +55,7 @@ export class AccessControlService {
    * 用户祖先+自身 org id 集合（path 段即 id）
    * 用户无 orgPath 时返回空数组（只能读个人文档）
    */
-  private ancestorOrgIds(user: AuthUser): string[] {
+  ancestorOrgIds(user: AuthUser): string[] {
     if (!user.orgPath) {
       return [];
     }

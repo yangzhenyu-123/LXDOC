@@ -22,6 +22,78 @@ import { onlyofficeConfig } from '../config/onlyoffice.config';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 
 /**
+ * OnlyOffice 可编辑格式按 documentType 分类
+ * 来源：OnlyOffice Docs conversion-tables（⬤=可作输入编辑）
+ * https://api.onlyoffice.com/docs/docs-api/additional-api/conversion-api/conversion-tables/
+ *
+ * - word：文档类（doc/docx/odt/rtf/txt/md/csv 等，含模板/宏/WPS/Apple/老格式）
+ * - cell：表格类（xlsx/xls/ods/csv/tsv 等，含模板/宏/WPS/Apple/老格式）
+ * - slide：演示类（pptx/ppt/odp/dps 等，含模板/宏/WPS/Apple/老格式）
+ *
+ * 注：csv/tsv 同时出现在 word 和 cell 表中，OnlyOffice 按 documentType 决定编辑器类型。
+ *     这里归入 cell（表格更自然），与 conversion-tables 默认一致。
+ *
+ * 不纳入 OnlyOffice 编辑的格式（仍走 kkFileView 预览）：
+ * - pdf：保持只读（docling 解析文本入库，避免 PDF→docx→编辑→回写破坏原版式）
+ * - fodt/fods/fodp（flat XML）：可编辑但极少见，走预览即可
+ * - epub/fb2/djvu/oxps/xps：电子书/版式，走预览
+ * - heic 等图片/音视频/CAD/3D：附件专用，非文档
+ */
+const ONLYOFFICE_WORD_FORMATS = new Set<DocumentFormat>([
+  DocumentFormat.DOC,
+  DocumentFormat.DOCX,
+  DocumentFormat.DOT,
+  DocumentFormat.DOTM,
+  DocumentFormat.DOTX,
+  DocumentFormat.ODT,
+  DocumentFormat.OTT,
+  DocumentFormat.RTF,
+  DocumentFormat.TXT,
+  DocumentFormat.MD,
+  DocumentFormat.WPS,
+  DocumentFormat.WPT,
+  DocumentFormat.OFD,
+]);
+
+const ONLYOFFICE_CELL_FORMATS = new Set<DocumentFormat>([
+  DocumentFormat.XLS,
+  DocumentFormat.XLSX,
+  DocumentFormat.XLSM,
+  DocumentFormat.XLT,
+  DocumentFormat.XLTM,
+  DocumentFormat.XLAM,
+  DocumentFormat.ODS,
+  DocumentFormat.OTS,
+  DocumentFormat.FODS,
+  DocumentFormat.ET,
+  DocumentFormat.ETT,
+  DocumentFormat.CSV,
+  DocumentFormat.TSV,
+]);
+
+const ONLYOFFICE_SLIDE_FORMATS = new Set<DocumentFormat>([
+  DocumentFormat.PPT,
+  DocumentFormat.PPTX,
+  DocumentFormat.PPTM,
+  DocumentFormat.ODP,
+  DocumentFormat.OTP,
+  DocumentFormat.DPS,
+]);
+
+/**
+ * 判断文档格式是否可由 OnlyOffice 编辑，并返回 documentType
+ * 返回 null 表示该格式不走 OnlyOffice（应走 kkFileView 预览或 MarkdownEditor）
+ */
+function getOnlyOfficeDocumentType(
+  format: DocumentFormat,
+): 'word' | 'cell' | 'slide' | null {
+  if (ONLYOFFICE_WORD_FORMATS.has(format)) return 'word';
+  if (ONLYOFFICE_CELL_FORMATS.has(format)) return 'cell';
+  if (ONLYOFFICE_SLIDE_FORMATS.has(format)) return 'slide';
+  return null;
+}
+
+/**
  * OnlyOffice 回调状态码
  * 详见 https://api.onlyoffice.com/editors/callback
  */
@@ -134,8 +206,11 @@ export class OnlyOfficeService {
     if (!doc) {
       throw new NotFoundException(`文档 ${id} 不存在`);
     }
-    if (doc.format !== DocumentFormat.DOCX && doc.format !== DocumentFormat.ODT) {
-      throw new BadRequestException('OnlyOffice 仅支持 docx/odt');
+    const documentType = getOnlyOfficeDocumentType(doc.format);
+    if (!documentType) {
+      throw new BadRequestException(
+        `OnlyOffice 不支持编辑 ${doc.format} 格式（该格式请用预览模式）`,
+      );
     }
     if (!doc.originalPath) {
       throw new NotFoundException(`文档 ${id} 缺少原始文件`);
@@ -161,18 +236,22 @@ export class OnlyOfficeService {
     const callbackUrl = `${onlyofficeConfig.backendPublicUrl}/api/documents/${id}/onlyoffice/callback`;
 
     const config: OnlyOfficeConfig = {
-      documentType: 'word',
+      documentType,
       document: {
         fileType: doc.format,
-        // key 随 version 变化，强制 OnlyOffice 重新加载
-        key: `${id}#v${doc.version}`,
+        // key 随 version 变化，强制 OnlyOffice 重新加载。
+        // 注意：key 会出现在 socket.io 连接 URL 路径中（/doc/<key>?EIO=4...），
+        // 不能含 URL 保留字符（# ? & / 等），否则会被截断导致连接失败。
+        // 用下划线连接 id 和 version，OnlyOffice 要求 key 仅含 [a-zA-Z0-9.-_]
+        key: `${id}_v${doc.version}`,
         title: `${doc.title}.${doc.format}`,
         url: fileUrl,
         permissions: {
           edit: finalMode === 'edit',
           download: true,
           print: true,
-          review: finalMode === 'edit',
+          // review（修订模式）仅 word 类有意义，cell/slide 无此概念
+          review: finalMode === 'edit' && documentType === 'word',
         },
       },
       editorConfig: {
@@ -367,17 +446,76 @@ export class OnlyOfficeService {
     return hosts;
   }
 
-  /**
-   * 重新抽取纯文本索引（best-effort）
-   * 用 pandoc docx→plain 更新 content 字段，仅供搜索
-   * pandoc 缺失或失败时跳过，不影响保存
-   */
+   /**
+    * 重新抽取纯文本索引（best-effort）
+    * 按 format 分流文本抽取策略：
+    * - pandoc 可处理：doc/docx/dot/dotm/dotx/odt/ott/rtf/wps/wpt/ofd → pandoc → plain
+    * - 直接读 utf-8：md/txt/csv/tsv（纯文本无需重型解析）
+    * - pdf：跳过（docling 已在 upload 时解析，编辑不改变原 PDF）
+    * - cell/slide 类（xlsx/xls/ods/et/pptx/ppt/odp/dps 等）：跳过（索引文本非必须，
+    *   且 pandoc 不支持这些格式；全文搜索仍可通过标题/标签覆盖）
+    *
+    * pandoc 缺失或失败时跳过，不影响保存。
+    */
   private async refreshIndexText(docId: string): Promise<void> {
     const doc = await this.documentRepo.findOne({ where: { id: docId } });
     if (!doc || !doc.originalPath) return;
     const absPath = path.join(getUploadDir(), doc.originalPath);
     if (!existsSync(absPath)) return;
-    const fromFormat = doc.format === DocumentFormat.DOCX ? 'docx' : 'odt';
+
+    // 纯文本类：直接读 utf-8
+    const PLAIN_TEXT_FORMATS = new Set<DocumentFormat>([
+      DocumentFormat.MD,
+      DocumentFormat.TXT,
+      DocumentFormat.CSV,
+      DocumentFormat.TSV,
+    ]);
+    if (PLAIN_TEXT_FORMATS.has(doc.format)) {
+      try {
+        const text = await fs.readFile(absPath, 'utf-8');
+        await this.documentRepo.update(docId, { content: text });
+      } catch (err) {
+        this.logger.warn(
+          `读取纯文本索引失败 docId=${docId}：${(err as Error).message}`,
+        );
+      }
+      return;
+    }
+
+    // pandoc 可处理的 word 类格式
+    const PANDOC_FORMATS = new Set<DocumentFormat>([
+      DocumentFormat.DOC,
+      DocumentFormat.DOCX,
+      DocumentFormat.DOT,
+      DocumentFormat.DOTM,
+      DocumentFormat.DOTX,
+      DocumentFormat.ODT,
+      DocumentFormat.OTT,
+      DocumentFormat.RTF,
+      DocumentFormat.WPS,
+      DocumentFormat.WPT,
+      DocumentFormat.OFD,
+    ]);
+    if (!PANDOC_FORMATS.has(doc.format)) {
+      // cell/slide/pdf 等：跳过索引抽取（best-effort）
+      return;
+    }
+
+    // pandoc 输入格式名（与 DocumentFormat 值基本一致，少数需映射）
+    const pandocFromMap: Partial<Record<DocumentFormat, string>> = {
+      [DocumentFormat.DOC]: 'doc',
+      [DocumentFormat.DOCX]: 'docx',
+      [DocumentFormat.DOT]: 'doc',
+      [DocumentFormat.DOTM]: 'docx',
+      [DocumentFormat.DOTX]: 'docx',
+      [DocumentFormat.ODT]: 'odt',
+      [DocumentFormat.OTT]: 'odt',
+      [DocumentFormat.RTF]: 'rtf',
+      [DocumentFormat.WPS]: 'docx',
+      [DocumentFormat.WPT]: 'docx',
+      [DocumentFormat.OFD]: 'ofd',
+    };
+    const fromFormat = pandocFromMap[doc.format] ?? doc.format;
     await new Promise<void>((resolve, reject) => {
       execFile(
         'pandoc',
@@ -393,6 +531,10 @@ export class OnlyOfficeService {
             .then(() => resolve())
             .catch(reject);
         },
+      );
+    }).catch((err) => {
+      this.logger.warn(
+        `pandoc 抽取索引文本失败 docId=${docId}：${(err as Error).message}`,
       );
     });
   }

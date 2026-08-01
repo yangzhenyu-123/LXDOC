@@ -1,0 +1,26 @@
+# LXDOC 备份容器
+# 基于 alpine + postgresql-client，内置 cron 定时执行 pg_dump + uploads tar
+# 镜像小（~30MB），无应用依赖，纯备份用途
+FROM docker.m.daocloud.io/library/alpine:3.19
+
+# 安装 postgresql-client（含 pg_dump/pg_restore）与 tzdata（时区）
+RUN apk add --no-cache postgresql-client tzdata busybox-suid && \
+    cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo "Asia/Shanghai" > /etc/timezone
+
+# 备份与恢复脚本
+COPY docker/backup.sh /usr/local/bin/backup.sh
+COPY docker/restore.sh /usr/local/bin/restore.sh
+RUN chmod +x /usr/local/bin/backup.sh /usr/local/bin/restore.sh
+
+# cron 表：每日 BACKUP_CRON 指定的时间执行（默认凌晨 2:00）
+# 格式与标准 crontab 一致："分 时 日 月 周"，如 "0 2 * * *" = 每天 2:00
+ENV BACKUP_CRON="0 2 * * *"
+ENV BACKUP_RETENTION_DAYS=7
+ENV BACKUP_DIR=/backups
+ENV UPLOADS_DIR=/app/uploads
+
+# 生成 crontab 并启动 cron（前台运行，容器不退出）
+# 用 busybox crond（crond -f 前台运行，-l 2 日志到 stderr）
+RUN echo "${BACKUP_CRON} /usr/local/bin/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+CMD ["crond", "-f", "-l", "2"]

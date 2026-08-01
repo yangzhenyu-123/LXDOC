@@ -132,9 +132,53 @@ return roles.some(r =>
 
 所有写接口在 service 层调用 `accessControl.assertCanWrite(user, doc)`，失败抛 403：
 
-- `DocumentsService.update` / `rollback` / `remove` / `convertToEditable`
+- `DocumentsService.update` / `rollback` / `remove` / `convertToEditable` / `aiSummary`
 - `OnlyOfficeService.buildConfig`（mode=edit 时）
+- `AttachmentsService.create` / `update` / `remove`（对主文档需写权限）
 - 分类 CRUD 的对应方法
+
+## 附件权限
+
+文档附件权限**复用主文档的读写权限**，不引入新的 ACL 主体：
+
+| 操作 | 需要的权限 | 校验位置 |
+|---|---|---|
+| 列主文档附件（`GET /documents/:docId/attachments`） | 主文档读权限 | AttachmentsService.listByDoc |
+| 上传/改/删附件 | 主文档写权限 | AttachmentsService.create/update/remove |
+| 附件 kkFileView 预览（`GET /documents/:docId/attachments/:attachId/kkview`） | 主文档读权限 | AttachmentsService.getKkviewUrl |
+| 附件文件下载（`GET /files/:docId/attachment/:attachId?token=`） | 主文档读权限（按 docId 签 token） | FilesService.verifyFileToken |
+
+**集合共享附件**：若文档 A 是某集合 B 的成员（document 类型附件），列出 A 的附件时会自动 union 集合主文档 B 的 file 类型附件。此 union 仅需对 A 有读权限即可访问（B 的附件视为集合公共资源），不需要对 B 单独有读权限。
+
+## 文档集权限
+
+文档集（`documents.is_collection=true`）本身是一篇主文档，权限按通用规则：
+
+- 创建集合：`POST /api/uploads/collection`，需对目标分类/组织有写权限（与上传普通文档一致）
+- 添加集合成员（`POST /documents/:docId/attachments/document`）：需对集合主文档有写权限
+- 删除集合成员（`DELETE /documents/:docId/attachments/:attachId`）：需对集合主文档有写权限
+- 被引用为成员的文档本身权限不变（集合引用不改变成员文档的可见性，只是聚合视图）
+
+## 收藏权限
+
+文档收藏（`document_favorites`）是用户私有关系：
+
+| 操作 | 权限 | 说明 |
+|---|---|---|
+| 收藏/取消收藏 | 对文档有读权限 | `POST /documents/:id/favorite` 切换，需读权限防恶意收藏不可见文档 |
+| 列我的收藏 | 任意登录用户 | `GET /documents/favorites` 仅返回当前用户的收藏，无需额外权限 |
+
+收藏关系仅属于用户本人，admin 也无法看到他人的收藏（与文档归属无关，纯个人偏好数据）。
+
+## 系统配置权限
+
+| 操作 | 权限 | 说明 |
+|---|---|---|
+| 读运行时配置（`GET /system/config`） | 任意登录用户 | 敏感项脱敏，便于前端展示当前生效配置 |
+| 改系统配置（`PUT /system/config`） | 仅 admin | 14 项可改配置，写入 `system_settings` 表 + 内存覆盖层 |
+| 列可改项清单（`GET /system/settings`） | 仅 admin | 含分组/类型/脱敏值 |
+| 列用户 LLM 配置概览（`GET /llm/users-overview`） | 仅 admin | 排查 LLM 接入异常，apiKey 脱敏 |
+| 改自己的 LLM 配置（`PUT /llm/my-config`） | 任意登录用户 | 普通用户只能改自己，admin 改自己时若用户级字段为空则自动回退系统配置 |
 
 ## 组织管理权限
 
@@ -161,13 +205,16 @@ interface AuthUser {
 
 ## 静态文件鉴权
 
-原文件 / 图片不裸暴露，统一走签名 URL：
+原文件 / 图片 / 附件不裸暴露，统一走签名 URL：
 
 1. 前端先调 `GET /api/files/token/:docId`（带 Bearer，后端校验读权限）拿短期 token
-2. 拼接到文件 URL：`/api/files/:docId/original?token=` 或 `/api/files/:docId/image/:name?token=`
-3. 该接口 `@Public` 跳过 JwtAuthGuard，由 `FilesService.verifyFileToken` 校验 token 签名、过期、docId 匹配
+2. 拼接到文件 URL：
+   - 原文件：`/api/files/:docId/original?token=`
+   - 图片：`/api/files/:docId/image/:name?token=`
+   - 附件：`/api/documents/:docId/attachments/:attachId/download?token=`
+3. 这些接口 `@Public` 跳过 JwtAuthGuard，由 `FilesService.verifyFileToken` 校验 token 签名、过期、docId 匹配
 
-token 有效期默认 10 分钟（`FILE_TOKEN_EXPIRES`），绑定 docId，不可跨文档使用。OnlyOffice 拉取 docx 也用此机制。
+token 有效期默认 10 分钟（`FILE_TOKEN_EXPIRES`），绑定 docId，不可跨文档使用。附件下载 token 按主文档 id 签发（不是按附件 id），便于复用同一签发机制，但路由不同以便审计区分。OnlyOffice 拉取文档、kkFileView 拉取预览文件均用此机制。
 
 ## 权限矩阵示例
 
@@ -183,6 +230,7 @@ token 有效期默认 10 分钟（`FILE_TOKEN_EXPIRES`），绑定 docId，不�
 ## 迁移与兼容
 
 - 存量 `Document`：`owner_type='personal'`、`owner_id=created_by`（在 `AppModule.onApplicationBootstrap` 回填）
-- 存量 `User`：`organization_id=null`（管理员后续分配）
+- 存量 `Document.is_collection`：默认回填 false
+- 存量 `User`：`organization_id=null`（管理员后续分配）；用户级 LLM 字段默认 null（未配置时回退系统配置）
 - 存量 `Category`：`organization_id=null`（公共树）
-- 存量 `Document.content_source`：md/txt→`manual`，docx/odt→`pandoc`，pdf→`pdf_text`
+- 存量 `Document.content_source`：md/txt/csv/tsv→`manual`，docx/odt→`pandoc`，pdf→`pdf_text`

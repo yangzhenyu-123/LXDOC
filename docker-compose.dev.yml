@@ -39,7 +39,7 @@ services:
       JWT_ENABLED: "true"
       JWT_SECRET: lxdoc-onlyoffice-dev-secret
     ports:
-      - "8081:80"
+      - "8082:80"
     volumes:
       - onlyoffice-dev-data:/var/www/onlyoffice/Data
       - onlyoffice-dev-cache:/var/lib/onlyoffice
