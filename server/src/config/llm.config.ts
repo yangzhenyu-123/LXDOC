@@ -4,7 +4,7 @@
  * - baseUrl：内网 GLM5.2 OpenAI 兼容端点（如 http://internal-glm/v1）
  * - apiKey：调用密钥（内网若无需鉴权可留空）
  * - model：默认对话模型（glm-5.2）
- * - embedBaseUrl：向量模型推理服务端点（如 TEI http://<PROD_HOST>:8081）
+ * - embedBaseUrl：向量模型推理服务端点（如 TEI http://<tei-host>:8081）
  * - embedModel：向量模型标识（如 BAAI/bge-m3）
  * - embedDimensions：向量维度（bge-m3 = 1024）
  * - timeout：单次请求超时（毫秒）
@@ -39,6 +39,33 @@ export const llmConfig = {
   get model(): string {
     return getOverrideString('llm.model', process.env.LLM_MODEL ?? 'glm-5.2');
   },
+  /**
+   * Vision（多模态）模型名，用于含图片的总结/RAG 问答。
+   * 留空则禁用 vision，含图文档自动回退到默认 model（仅文本，图片被忽略 + warn 日志）。
+   * 例：qwen3.6-35b-a3b（支持图片输入，与 GLM5.2 同 OpenAI 兼容接口）。
+   */
+  get visionModel(): string {
+    return getOverrideString('llm.visionModel', process.env.LLM_VISION_MODEL ?? '');
+  },
+  /**
+   * Vision 端点 baseUrl（OpenAI 兼容）。留空时复用 baseUrl（同端点不同模型场景）。
+   * 例：若 qwen 与 GLM 部署在同一端点，仅配 LLM_VISION_MODEL 即可。
+   */
+  get visionBaseUrl(): string {
+    return getOverrideString('llm.visionBaseUrl', process.env.LLM_VISION_BASE_URL ?? '');
+  },
+  /** Vision 端点 apiKey。留空时复用 apiKey。 */
+  get visionApiKey(): string {
+    return getOverrideString('llm.visionApiKey', process.env.LLM_VISION_API_KEY ?? '');
+  },
+  /** 单次最多投喂图片数（防 token 爆炸，默认 5） */
+  get visionMaxImages(): number {
+    return getOverrideNumber('llm.visionMaxImages', Number(process.env.LLM_VISION_MAX_IMAGES ?? '5') || 5);
+  },
+  /** 单张图片最大字节（超出跳过 + warn，默认 2MB） */
+  get visionMaxImageBytes(): number {
+    return getOverrideNumber('llm.visionMaxImageBytes', Number(process.env.LLM_VISION_MAX_IMAGE_BYTES ?? String(2 * 1024 * 1024)) || 2 * 1024 * 1024);
+  },
   get embedBaseUrl(): string {
     return getOverrideString('llm.embedBaseUrl', process.env.LLM_EMBED_BASE_URL ?? '');
   },
@@ -49,7 +76,7 @@ export const llmConfig = {
     return getOverrideNumber('llm.embedDimensions', Number(process.env.LLM_EMBED_DIMENSIONS ?? '0') || 0);
   },
   /**
-   * Rerank 模型推理服务端点（TEI rerank，如 http://<PROD_HOST>:8082）
+   * Rerank 模型推理服务端点（TEI rerank，如 http://<tei-host>:8082）
    * 留空则禁用 rerank，仅走 RRF 融合
    */
   get rerankBaseUrl(): string {

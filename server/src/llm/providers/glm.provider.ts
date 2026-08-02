@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import {
   LlmChatOptions,
   LlmChatResult,
+  LlmContentPart,
   LlmEmbedResult,
   LlmMessage,
   LlmNotSupportedException,
@@ -11,6 +12,16 @@ import {
 } from '../llm-provider.interface';
 import { llmConfig } from '../../config/llm.config';
 import { parseSseLine, isDataLine } from './glm-sse.utils';
+
+/**
+ * 判断消息数组是否含图片片段（多模态）
+ * （与 vision.utils.hasVisionMessage 同语义；此处独立实现避免循环依赖）
+ */
+function hasImageContent(messages: LlmMessage[]): boolean {
+  return messages.some(
+    (m) => Array.isArray(m.content) && m.content.some((p: LlmContentPart) => p.type === 'image_url'),
+  );
+}
 
 /**
  * GLM Provider（内网 GLM5.2，OpenAI 兼容接口）
@@ -46,19 +57,13 @@ export class GlmProvider implements LlmProvider, LlmStreamProvider {
     opts?: LlmChatOptions,
   ): Promise<LlmChatResult> {
     // 支持通过 opts 覆盖连接配置（admin 配多套 LLM 时按用户选择注入）
-    const baseUrl = opts?.baseUrl ?? llmConfig.baseUrl;
-    const apiKey = opts?.apiKey ?? llmConfig.apiKey;
-    // 有覆盖时即使全局未启用也可调用（多套配置场景）
-    if (!opts?.baseUrl && !this.isReady()) {
-      throw new LlmNotSupportedException('GLM 未启用或未配置 baseUrl');
-    }
-    if (!baseUrl) {
+    const conn = this.resolveConnection(opts, messages);
+    if (!conn.baseUrl) {
       throw new LlmNotSupportedException('GLM 未配置 baseUrl');
     }
-    const model = opts?.model ?? llmConfig.model;
-    const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+    const url = `${conn.baseUrl.replace(/\/$/, '')}/chat/completions`;
     const body: Record<string, unknown> = {
-      model,
+      model: conn.model,
       messages,
       temperature: opts?.temperature ?? 0.7,
       ...(opts?.maxTokens ? { max_tokens: opts.maxTokens } : {}),
@@ -69,11 +74,11 @@ export class GlmProvider implements LlmProvider, LlmStreamProvider {
     if (opts?.enableThinking === false) {
       body.chat_template_kwargs = { enable_thinking: false };
     }
-    const data = await this.requestWithRetry(url, body, opts?.timeout, apiKey);
+    const data = await this.requestWithRetry(url, body, opts?.timeout, conn.apiKey);
     const choice = data?.choices?.[0]?.message?.content ?? '';
     return {
       content: choice,
-      model: data?.model ?? model,
+      model: data?.model ?? conn.model,
       promptTokens: data?.usage?.prompt_tokens,
       completionTokens: data?.usage?.completion_tokens,
     };
@@ -94,18 +99,13 @@ export class GlmProvider implements LlmProvider, LlmStreamProvider {
     messages: LlmMessage[],
     opts?: LlmChatOptions & { signal?: AbortSignal },
   ): AsyncGenerator<LlmStreamChunk, void, unknown> {
-    const baseUrl = opts?.baseUrl ?? llmConfig.baseUrl;
-    const apiKey = opts?.apiKey ?? llmConfig.apiKey;
-    if (!opts?.baseUrl && !this.isReady()) {
-      throw new LlmNotSupportedException('GLM 未启用或未配置 baseUrl');
-    }
-    if (!baseUrl) {
+    const conn = this.resolveConnection(opts, messages);
+    if (!conn.baseUrl) {
       throw new LlmNotSupportedException('GLM 未配置 baseUrl');
     }
-    const model = opts?.model ?? llmConfig.model;
-    const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+    const url = `${conn.baseUrl.replace(/\/$/, '')}/chat/completions`;
     const body: Record<string, unknown> = {
-      model,
+      model: conn.model,
       messages,
       temperature: opts?.temperature ?? 0.7,
       stream: true,
@@ -134,7 +134,7 @@ export class GlmProvider implements LlmProvider, LlmStreamProvider {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
       };
-      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      if (conn.apiKey) headers.Authorization = `Bearer ${conn.apiKey}`;
       const resp = await fetch(url, {
         method: 'POST',
         headers,
@@ -201,6 +201,66 @@ export class GlmProvider implements LlmProvider, LlmStreamProvider {
         opts.signal.removeEventListener('abort', onExternalAbort);
       }
     }
+  }
+
+  /**
+   * 解析本次调用的连接配置（含 vision 路由）
+   *
+   * 路由规则（按优先级）：
+   * 1. opts.baseUrl / opts.apiKey / opts.model 显式覆盖（admin 多套 LLM 配置场景）
+   *    - 此时即使全局未启用（isReady() false）也可调用
+   * 2. 消息含图片片段（hasImageContent）或 opts.vision=true：
+   *    - 切到 visionModel / visionBaseUrl（留空回退 baseUrl） / visionApiKey（留空回退 apiKey）
+   *    - visionModel 未配置时回退默认 model（仅文本，图片被端点忽略 + warn 日志）
+   * 3. 默认：用 llmConfig.baseUrl / apiKey / model（须 isReady）
+   *
+   * @returns 解析后的连接配置 + 一个标志指示是否回退到非 vision 模型
+   */
+  private resolveConnection(
+    opts: LlmChatOptions | undefined,
+    messages: LlmMessage[],
+  ): { baseUrl: string; apiKey: string; model: string } {
+    // 1) 显式覆盖优先
+    if (opts?.baseUrl) {
+      return {
+        baseUrl: opts.baseUrl,
+        apiKey: opts.apiKey ?? llmConfig.apiKey,
+        model: opts.model ?? llmConfig.model,
+      };
+    }
+    if (opts?.model) {
+      // 仅覆盖 model，baseUrl/apiKey 走默认
+      if (!this.isReady()) {
+        throw new LlmNotSupportedException('GLM 未启用或未配置 baseUrl');
+      }
+      return { baseUrl: llmConfig.baseUrl, apiKey: llmConfig.apiKey, model: opts.model };
+    }
+
+    // 2) vision 路由：消息含图 或 opts.vision=true
+    const needVision = opts?.vision === true || hasImageContent(messages);
+    if (needVision) {
+      const visionModel = llmConfig.visionModel;
+      if (!visionModel) {
+        // vision 未配置：回退默认 model（仅文本），图片片段会被端点忽略
+        this.logger.warn(
+          '消息含图片但 LLM_VISION_MODEL 未配置，回退到默认模型（图片将被忽略）',
+        );
+        if (!this.isReady()) {
+          throw new LlmNotSupportedException('GLM 未启用或未配置 baseUrl');
+        }
+        return { baseUrl: llmConfig.baseUrl, apiKey: llmConfig.apiKey, model: llmConfig.model };
+      }
+      // vision 配置就绪：用 vision 端点 + model，baseUrl/apiKey 留空时复用默认
+      const baseUrl = llmConfig.visionBaseUrl || llmConfig.baseUrl;
+      const apiKey = llmConfig.visionApiKey || llmConfig.apiKey;
+      return { baseUrl, apiKey, model: visionModel };
+    }
+
+    // 3) 默认
+    if (!this.isReady()) {
+      throw new LlmNotSupportedException('GLM 未启用或未配置 baseUrl');
+    }
+    return { baseUrl: llmConfig.baseUrl, apiKey: llmConfig.apiKey, model: llmConfig.model };
   }
 
   async embed(text: string, model?: string): Promise<LlmEmbedResult> {

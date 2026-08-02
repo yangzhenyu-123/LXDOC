@@ -27,6 +27,8 @@ import { OptionalLlm } from '../llm/optional-llm.decorator';
 import { LlmService } from '../llm/llm.service';
 import { LlmConfigService } from '../llm/llm-config.service';
 import { llmConfig } from '../config/llm.config';
+import { LlmContentPart } from '../llm/llm-provider.interface';
+import { enhanceWithImages } from '../knowledge-base/vision.utils';
 import { kkfileviewConfig } from '../config/kkfileview.config';
 import { onlyofficeConfig } from '../config/onlyoffice.config';
 
@@ -333,13 +335,10 @@ export class DocumentsService {
     }
 
     // 读取已解析的文本内容
-    // 图片链接替换为占位：LLM 无法识图，保留 /api/files/... URL 对模型是无意义噪声，
-    // 替换为 [图片: alt] 占位，既减少 token 又保留图片存在感知
-    const rawText = (doc.content ?? '')
-      .replace(/!\[([^\]]*)\]\([^)]*\)/g, (_m, alt: string) =>
-        `[图片${alt ? `: ${alt}` : ''}]`,
-      )
-      .trim();
+    // 含图片引用时启用 vision 增强：保留 /api/files/... 引用，由 enhanceWithImages 读取并转 data URI，
+    // 升级 user 消息为多模态格式，GlmProvider 据此自动切到 vision 模型（qwen3.6-35b-a3b 等）。
+    // vision 未配置/图片读取失败时回退纯文本（图片引用替换为 [图片: alt] 占位减少噪声）。
+    const rawText = (doc.content ?? '').trim();
     if (!rawText) {
       throw new BadRequestException(
         '文档无可用文本内容（可能尚未解析或为空文档），无法生成总结',
@@ -351,6 +350,32 @@ export class DocumentsService {
 
     // 构造总结 prompt：要求生成结构化 Markdown，适合 Docsify 阅读视图
     const summaryPrompt = this.buildSummaryPrompt(doc.title, feedText);
+
+    // vision 增强：含图片引用时升级 user 消息为多模态
+    const lastMsg = summaryPrompt.messages[summaryPrompt.messages.length - 1];
+    let visionImageCount = 0;
+    if (lastMsg && typeof lastMsg.content === 'string' && lastMsg.content.includes('/api/files/')) {
+      const enhanced = await enhanceWithImages(lastMsg.content);
+      if (enhanced.imageCount > 0) {
+        lastMsg.content = enhanced.content;
+        visionImageCount = enhanced.imageCount;
+      } else {
+        // 无图/vision 未就绪：图片引用替换为 [图片: alt] 占位，减少 URL 噪声
+        lastMsg.content = (lastMsg.content as string).replace(
+          /!\[([^\]]*)\]\([^)]*\)/g,
+          (_m, alt: string) => `[图片${alt ? `: ${alt}` : ''}]`,
+        );
+      }
+    } else {
+      // 无图片引用：原占位替换逻辑保留（避免把 URL 喂给非 vision 模型当噪声）
+      lastMsg.content = (lastMsg.content as string).replace(
+        /!\[([^\]]*)\]\([^)]*\)/g,
+        (_m, alt: string) => `[图片${alt ? `: ${alt}` : ''}]`,
+      );
+    }
+    if (visionImageCount > 0) {
+      this.logger.log(`AI 总结启用 vision 投喂图片 ${visionImageCount} 张 source=${doc.id}`);
+    }
 
     const result = await this.llm.chat(summaryPrompt.messages, {
       temperature: 0.3, // 总结任务用较低温度保证稳定
@@ -439,7 +464,7 @@ export class DocumentsService {
   private buildSummaryPrompt(
     title: string,
     feedText: string,
-  ): { messages: { role: 'system' | 'user'; content: string }[]; maxTokens: number } {
+  ): { messages: { role: 'system' | 'user'; content: string | LlmContentPart[] }[]; maxTokens: number } {
     const system = [
       '你是一名专业的文档分析师，擅长将冗长的文档提炼为结构清晰的中文总结。',
       '请基于用户提供的文档内容，生成一份结构化 Markdown 总结文档，要求：',

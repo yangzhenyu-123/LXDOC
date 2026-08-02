@@ -20,11 +20,26 @@
 export type LlmRole = 'system' | 'user' | 'assistant';
 
 /**
+ * 多模态消息内容片段（OpenAI 兼容格式）
+ * - text：纯文本片段
+ * - image_url：图片片段，url 可为 http(s) URL 或 data URI（base64）
+ */
+export type LlmContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+/**
  * 对话消息（OpenAI 兼容格式）
+ *
+ * content 类型：
+ * - string：纯文本消息（绝大多数场景，向后兼容）
+ * - LlmContentPart[]：多模态消息（含图片时用，vision 模型支持）
+ *
+ * GlmProvider 直接 JSON.stringify 传给端点（vLLM/SGLang 原生支持 OpenAI 多模态格式）。
  */
 export interface LlmMessage {
   role: LlmRole;
-  content: string;
+  content: string | LlmContentPart[];
 }
 
 /**
@@ -47,6 +62,13 @@ export interface LlmChatOptions {
    * 不支持推理的 Provider 忽略此选项。
    */
   enableThinking?: boolean;
+  /**
+   * 强制使用 vision（多模态）模型，用于含图片消息的场景。
+   * - true：Provider 切到 visionModel / visionBaseUrl / visionApiKey（未配置时回退默认 + warn）
+   * - 省略/false：消息含 image_url 片段时 Provider 也自动识别并切换
+   * 业务层通常无需显式设置；由 GlmProvider 内部检测消息内容决定。
+   */
+  vision?: boolean;
   /**
    * 连接覆盖（admin 配置多套 LLM 时，按用户选择的 LlmConfig 注入）。
    * 省略时 Provider 使用全局 llmConfig。

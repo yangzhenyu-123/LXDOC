@@ -9,6 +9,7 @@ import { LlmService } from '../llm/llm.service';
 import { LlmMessage } from '../llm/llm-provider.interface';
 import { OptionalLlm } from '../llm/optional-llm.decorator';
 import { buildKnowledge, buildPrompt, classifyScore, truncateHistory, HistoryMessage } from './rag.utils';
+import { enhanceWithImages } from './vision.utils';
 
 /**
  * RAG 引用元数据（回传给前端）
@@ -236,10 +237,25 @@ export class RagService {
     const knowledge = buildKnowledge(chunks, titleMap, cfg);
     const truncatedHistory = truncateHistory(options?.history ?? []);
     const messages = buildPrompt(query, knowledge, truncatedHistory, this.ragPromptService.getPrompts());
+
+    // 5.1 vision 增强：检索命中的 chunk 若含图片引用，读取图片转 data URI，
+    //     升级最后一条 user 消息为多模态格式。GlmProvider 据此自动切到 vision 模型。
+    //     图片读取失败/vision 未配置时回退纯文本（不阻断主流程）。
+    let visionImageCount = 0;
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && typeof lastMsg.content === 'string' && lastMsg.content.includes('/api/files/')) {
+      const enhanced = await enhanceWithImages(lastMsg.content);
+      if (enhanced.imageCount > 0) {
+        lastMsg.content = enhanced.content;
+        visionImageCount = enhanced.imageCount;
+      }
+    }
+
     this.logger.log(
       `RAG 问答 kb=${kbId.slice(0, 8)} query="${query.slice(0, 30)}" ` +
       `chunks=${chunks.length} topScore=${topScore.toFixed(4)} fallback=${isFallback}` +
-      (truncatedHistory.length > 0 ? ` history=${truncatedHistory.length}` : ''),
+      (truncatedHistory.length > 0 ? ` history=${truncatedHistory.length}` : '') +
+      (visionImageCount > 0 ? ` visionImages=${visionImageCount}` : ''),
     );
 
     // 6. LLM 就绪检查（未启用时显式 error，避免空答案让用户困惑）
