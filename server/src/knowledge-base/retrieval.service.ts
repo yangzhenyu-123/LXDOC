@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { EmbeddingService } from './embedding.service';
+import { RerankService } from './rerank.service';
 import { rrfFuse, VectorHit, TrgmHit, FusedResult } from './retrieval.utils';
 
 /**
@@ -41,6 +42,15 @@ export interface RetrievalConfig {
   finalTopK: number;
   /** 限定检索文档范围（空则全 KB 检索，文档选择器用） */
   documentIds?: string[];
+  /**
+   * 是否启用 rerank（cross-encoder 二次排序）
+   * - true：RRF 融合后取前 rerankCandidateK 送 rerank，按 rerank score 重排取 finalTopK
+   * - false/省略：仅 RRF 融合，取 finalTopK
+   * RerankService 未就绪时自动降级为仅 RRF
+   */
+  rerank?: boolean;
+  /** 送 rerank 的候选数（默认 20，须 >= finalTopK） */
+  rerankCandidateK?: number;
 }
 
 export const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
@@ -68,7 +78,13 @@ export class RetrievalService {
   constructor(
     private readonly entityManager: EntityManager,
     private readonly embeddingService: EmbeddingService,
+    private readonly rerankService: RerankService,
   ) {}
+
+  /** Rerank 是否就绪（供 RagService 选阈值用） */
+  isRerankReady(): boolean {
+    return this.rerankService.isReady();
+  }
 
   /**
    * 混合检索
@@ -110,8 +126,30 @@ export class RetrievalService {
     // 3. RRF 融合（纯函数，从 retrieval.utils 导入）
     const fused = rrfFuse(vectorHits, trgmHits, cfg.rrfK);
 
-    // 4. 取 finalTopK
-    const results = fused.slice(0, cfg.finalTopK).map((f, i) => ({
+    // 4. rerank（若启用且 RerankService 就绪）
+    let ranked: FusedResult[];
+    if (cfg.rerank && this.rerankService.isReady()) {
+      const candidateK = cfg.rerankCandidateK ?? 20;
+      const candidates = fused.slice(0, Math.max(candidateK, cfg.finalTopK));
+      try {
+        const texts = candidates.map((c) => c.content);
+        const rerankResults = await this.rerankService.rerank(query, texts);
+        // 按 rerank score 降序重排
+        ranked = rerankResults
+          .map((r) => ({ ...candidates[r.index], score: r.score }))
+          .slice(0, cfg.finalTopK);
+        // 重置 hitBy 标记（rerank 后不再区分 vector/trgm/both）
+        ranked = ranked.map((f) => ({ ...f, hitBy: f.hitBy }));
+      } catch (err) {
+        this.logger.warn(`Rerank 失败，降级仅 RRF：${(err as Error).message}`);
+        ranked = fused.slice(0, cfg.finalTopK);
+      }
+    } else {
+      // 4. 取 finalTopK
+      ranked = fused.slice(0, cfg.finalTopK);
+    }
+
+    const results = ranked.map((f, i) => ({
       chunkId: f.chunkId,
       content: f.content,
       documentId: f.documentId,
@@ -125,7 +163,9 @@ export class RetrievalService {
 
     this.logger.log(
       `检索 kb=${kbId.slice(0, 8)} query="${query.slice(0, 30)}" ` +
-      `向量=${vectorHits.length} 词法=${trgmHits.length} 融合=${results.length}` +
+      `向量=${vectorHits.length} 词法=${trgmHits.length} 融合=${fused.length}` +
+      (cfg.rerank && this.rerankService.isReady() ? ` rerank=1` : '') +
+      ` 返回=${results.length}` +
       (docFilter ? ` docs=${docFilter.length}` : ''),
     );
     return results;

@@ -7,6 +7,8 @@ import { KbChunk, ChunkType } from './entities/kb-chunk.entity';
 import { Document } from '../documents/document.entity';
 import { ChunkingService, ChunkResult, ChunkStrategy } from './chunking.service';
 import { EmbeddingService } from './embedding.service';
+import { LlmService } from '../llm/llm.service';
+import { OptionalLlm } from '../llm/optional-llm.decorator';
 
 /**
  * 知识库管理服务
@@ -32,6 +34,7 @@ export class KnowledgeBaseService {
     private readonly chunkingService: ChunkingService,
     private readonly embeddingService: EmbeddingService,
     private readonly entityManager: EntityManager,
+    @OptionalLlm() private readonly llmService?: LlmService,
   ) {}
 
   // ========== 知识库 CRUD ==========
@@ -280,5 +283,77 @@ export class KnowledgeBaseService {
       headingPath: chunk.headingPath,
       parentChunkId: chunk.parentChunkId,
     };
+  }
+
+  /**
+   * 生成示例问题（R4）
+   *
+   * 调 LLM 基于文档列表生成 5-10 个测试问题，存到 kb.sample_questions。
+   * 前端问答页展示为快捷入口，用户点击直接发起提问。
+   *
+   * 设计参考：
+   * - Yuxi `sample_question_utils.py:generate_database_sample_questions`
+   * - 用途：① 推荐问题降低用户冷启动成本 ② 作为评估数据集 seed
+   *
+   * 失败处理：LLM 未就绪/生成失败时抛错，由 controller 转 HTTP 响应
+   */
+  async generateSampleQuestions(kbId: string, count = 6): Promise<string[]> {
+    const kb = await this.findOne(kbId);
+    if (!this.llmService?.isReady()) {
+      throw new BadRequestException('AI 服务未启用，无法生成示例问题');
+    }
+
+    // 取文档列表（标题 + 格式 + chunk 数）
+    const docs = await this.listDocuments(kbId);
+    if (docs.length === 0) {
+      throw new BadRequestException('知识库无文档，无法生成示例问题');
+    }
+
+    // 拼文档清单（限制前 50 个，避免 prompt 过长）
+    const docList = docs.slice(0, 50).map((d, i) =>
+      `${i + 1}. ${d.title}（${d.format}，${d.chunkCount}块）`,
+    ).join('\n');
+
+    const prompt = `你是企业知识库助手。根据下方知识库的文档列表，生成 ${count} 个用户可能问的问题。
+
+知识库「${kb.name}」的文档列表：
+${docList}
+
+要求：
+1. 问题必须是用户实际可能问的，与文档内容相关
+2. 问题简洁明了，一句话，不超 30 字
+3. 问题覆盖不同文档（不要全集中在一个文档）
+4. 问题用简体中文
+5. 只输出问题列表，每行一个，不要编号不要额外说明
+
+输出示例：
+什么是 RAG 架构？
+如何配置检索策略？`;
+
+    const result = await this.llmService.chat(
+      [{ role: 'user', content: prompt }],
+      { temperature: 0.7, maxTokens: 512, enableThinking: false },
+    );
+    if (!result?.content) {
+      throw new BadRequestException('生成示例问题失败，请稍后重试');
+    }
+
+    // 解析：按行分割，去空行，去可能的前导序号
+    const questions = result.content
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('```'))
+      .map((l) => l.replace(/^\d+[.、)]\s*/, '')) // 去 "1. " / "1、 " / "1) "
+      .slice(0, count);
+
+    if (questions.length === 0) {
+      throw new BadRequestException('生成示例问题为空，请稍后重试');
+    }
+
+    // 存到 KB
+    kb.sampleQuestions = questions;
+    await this.kbRepo.save(kb);
+    this.logger.log(`生成 ${questions.length} 个示例问题 kb=${kbId.slice(0, 8)}`);
+    return questions;
   }
 }

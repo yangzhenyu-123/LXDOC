@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { Document } from '../documents/document.entity';
 import { RetrievalService, RetrievalResult } from './retrieval.service';
+import { RagPromptService } from './rag-prompt.service';
 import { LlmService } from '../llm/llm.service';
 import { LlmMessage } from '../llm/llm-provider.interface';
 import { OptionalLlm } from '../llm/optional-llm.decorator';
@@ -54,10 +55,14 @@ export type RagEvent =
 export interface RagConfig {
   /** 检索 finalTopK（传给 RetrievalService） */
   retrievalTopK: number;
-  /** 拒答阈值：top1 score < abstainThreshold 直接拒答 */
+  /** 拒答阈值（RRF 模式）：top1 score < abstainThreshold 直接拒答 */
   abstainThreshold: number;
-  /** 降级阈值：top1 score < degradeThreshold 时标注 isFallback */
+  /** 降级阈值（RRF 模式）：top1 score < degradeThreshold 时标注 isFallback */
   degradeThreshold: number;
+  /** 拒答阈值（rerank 模式）：rerank score < 此值直接拒答 */
+  rerankAbstainThreshold: number;
+  /** 降级阈值（rerank 模式）：rerank score < 此值时标注 isFallback */
+  rerankDegradeThreshold: number;
   /** 单 chunk 内容最大字符数（拼 prompt 时截断） */
   maxChunkChars: number;
   /** 上下文总最大字符数（拼 prompt 时截断） */
@@ -68,6 +73,8 @@ export interface RagConfig {
   maxTokens: number;
   /** LLM 超时（毫秒） */
   llmTimeout: number;
+  /** 是否启用 rerank（cross-encoder 二次排序）。RerankService 未就绪时自动降级 */
+  useRerank: boolean;
 }
 
 export const DEFAULT_RAG_CONFIG: RagConfig = {
@@ -83,11 +90,18 @@ export const DEFAULT_RAG_CONFIG: RagConfig = {
   //   degradeThreshold=0.030：低于 both rank 1 的分数 → 降级标注（仅单路命中）
   abstainThreshold: 0.020,
   degradeThreshold: 0.030,
+  // rerank 启用时，score 是 cross-encoder relevance（0-1，bge-reranker-v2-m3）
+  // 阈值校准：实测 bge-reranker-v2-m3 对相关 query 给 0.3+，对弱相关给 0.05-0.2，对无关给 < 0.05
+  //   abstain < 0.05：几乎无关 → 拒答
+  //   degrade < 0.15：弱相关 → 降级标注
+  rerankAbstainThreshold: 0.05,
+  rerankDegradeThreshold: 0.15,
   maxChunkChars: 2000,
   maxContextChars: 8000,
   temperature: 0.3,
   maxTokens: 2048,
   llmTimeout: 120_000, // RAG 生成耗时较长，给 2 分钟
+  useRerank: true, // RerankService 未就绪时自动降级
 };
 
 /**
@@ -110,6 +124,7 @@ export class RagService {
     private readonly retrievalService: RetrievalService,
     @InjectRepository(Document)
     private readonly docRepo: Repository<Document>,
+    private readonly ragPromptService: RagPromptService,
     @OptionalLlm() private readonly llmService?: LlmService,
   ) {}
 
@@ -142,6 +157,7 @@ export class RagService {
     try {
       chunks = await this.retrievalService.retrieve(kbId, query, {
         finalTopK: cfg.retrievalTopK,
+        rerank: cfg.useRerank,
         ...(options?.documentIds && options.documentIds.length > 0
           ? { documentIds: options.documentIds }
           : {}),
@@ -153,11 +169,19 @@ export class RagService {
     }
 
     // 2. 拒答判断（top1 score < abstainThreshold 直接拒答）
+    //    score 语义由是否实际做了 rerank 决定：
+    //    - rerank 启用且 RerankService 就绪 → score 是 cross-encoder relevance（0-1），用 rerank 阈值
+    //    - 否则 → score 是 RRF 分数，用 RRF 阈值
     const topScore = chunks[0]?.score ?? 0;
-    const scoreClass = classifyScore(topScore, cfg);
+    const rerankActive = cfg.useRerank && this.retrievalService.isRerankReady();
+    const thresholds = rerankActive
+      ? { abstainThreshold: cfg.rerankAbstainThreshold, degradeThreshold: cfg.rerankDegradeThreshold }
+      : { abstainThreshold: cfg.abstainThreshold, degradeThreshold: cfg.degradeThreshold };
+    const scoreClass = classifyScore(topScore, thresholds);
     if (chunks.length === 0 || scoreClass === 'abstain') {
       this.logger.log(
-        `拒答 kb=${kbId.slice(0, 8)} query="${query.slice(0, 30)}" topScore=${topScore.toFixed(4)} < ${cfg.abstainThreshold}`,
+        `拒答 kb=${kbId.slice(0, 8)} query="${query.slice(0, 30)}" topScore=${topScore.toFixed(4)} < ${thresholds.abstainThreshold}` +
+        (rerankActive ? '(rerank)' : '(rrf)'),
       );
       yield {
         type: 'done',
@@ -199,7 +223,7 @@ export class RagService {
     // 5. 组装 prompt（含历史对话拼接，纯函数从 rag.utils 导入）
     const knowledge = buildKnowledge(chunks, titleMap, cfg);
     const truncatedHistory = truncateHistory(options?.history ?? []);
-    const messages = buildPrompt(query, knowledge, truncatedHistory);
+    const messages = buildPrompt(query, knowledge, truncatedHistory, this.ragPromptService.getPrompts());
     this.logger.log(
       `RAG 问答 kb=${kbId.slice(0, 8)} query="${query.slice(0, 30)}" ` +
       `chunks=${chunks.length} topScore=${topScore.toFixed(4)} fallback=${isFallback}` +

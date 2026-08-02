@@ -48,6 +48,21 @@ export const llmConfig = {
   get embedDimensions(): number {
     return getOverrideNumber('llm.embedDimensions', Number(process.env.LLM_EMBED_DIMENSIONS ?? '0') || 0);
   },
+  /**
+   * Rerank 模型推理服务端点（TEI rerank，如 http://<PROD_HOST>:8082）
+   * 留空则禁用 rerank，仅走 RRF 融合
+   */
+  get rerankBaseUrl(): string {
+    return getOverrideString('llm.rerankBaseUrl', process.env.LLM_RERANK_BASE_URL ?? '');
+  },
+  /** Rerank 模型标识（如 BAAI/bge-reranker-v2-m3） */
+  get rerankModel(): string {
+    return getOverrideString('llm.rerankModel', process.env.LLM_RERANK_MODEL ?? 'BAAI/bge-reranker-v2-m3');
+  },
+  /** Rerank 候选数（RRF 融合后取前 N 送 rerank，默认 20） */
+  get rerankCandidateK(): number {
+    return getOverrideNumber('llm.rerankCandidateK', Number(process.env.LLM_RERANK_CANDIDATE_K ?? '20') || 20);
+  },
   get timeout(): number {
     return getOverrideNumber('llm.timeout', Number(process.env.LLM_TIMEOUT ?? '30000') || 30000);
   },

@@ -7,7 +7,7 @@ import { marked } from 'marked';
 import { useAuthStore } from '@/stores/auth';
 import { sanitizeMarkedHtml } from '@/utils/sanitize';
 import { extractRefTokens, replaceRefPlaceholders } from '@/utils/rag-refs';
-import { getKb, askStream, retrieve, listKbs, getKbStats, listKbDocuments, getChunk, type KnowledgeBase, type KbStats, type KbDocument, type RagEvent, type RagReference, type HistoryMessage, type ChunkDetail } from '@/api/kb';
+import { getKb, askStream, retrieve, listKbs, getKbStats, listKbDocuments, getChunk, generateSampleQuestions, type KnowledgeBase, type KbStats, type KbDocument, type RagEvent, type RagReference, type HistoryMessage, type ChunkDetail } from '@/api/kb';
 
 /**
  * RAG 知识库问答页（核心）
@@ -132,13 +132,20 @@ async function loadCurrentKb(id: string) {
 async function sendQuery() {
   const q = inputQuery.value.trim();
   if (!q || streaming.value) return;
+  inputQuery.value = '';
+  await doSend(q);
+}
+
+/**
+ * 实际发起提问（R4：示例问题快捷入口也复用此函数）
+ * 抽取自 sendQuery，便于以任意 query 触发流式问答。
+ */
+async function doSend(q: string) {
+  if (!q || streaming.value) return;
   if (!currentKb.value) {
     ElMessage.warning('请先选择知识库');
     return;
   }
-
-  // 重置输入
-  inputQuery.value = '';
 
   // 用户消息
   messages.value.push({ role: 'user', content: q, status: 'done' });
@@ -365,6 +372,36 @@ onMounted(async () => {
   await syncFromRoute();
 });
 
+// ============ R4 示例问题 ============
+
+const generatingSamples = ref(false);
+
+/**
+ * 调后端生成示例问题（LLM 基于文档列表生成）。
+ * 生成成功后刷新 currentKb.sampleQuestions，UI 即时展示新 chips。
+ */
+async function onGenerateSamples() {
+  if (!currentKb.value || generatingSamples.value) return;
+  generatingSamples.value = true;
+  try {
+    const questions = await generateSampleQuestions(currentKb.value.id);
+    currentKb.value = { ...currentKb.value, sampleQuestions: questions };
+    ElMessage.success(`已生成 ${questions.length} 个示例问题`);
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.message ?? '生成示例问题失败');
+  } finally {
+    generatingSamples.value = false;
+  }
+}
+
+/**
+ * 点击示例问题 chip：直接发起提问（不必先填输入框）。
+ */
+async function onPickSample(q: string) {
+  if (streaming.value) return;
+  await doSend(q);
+}
+
 // marked 配置：GFM + 换行转 <br>
 marked.setOptions({ gfm: true, breaks: true });
 </script>
@@ -409,6 +446,35 @@ marked.setOptions({ gfm: true, breaks: true });
           <p class="welcome-desc" v-if="currentKb">
             基于「{{ currentKb.name }}」的 {{ currentStats?.documentCount ?? 0 }} 篇文档进行检索增强回答
           </p>
+          <!-- R4: 示例问题快捷入口 -->
+          <div class="sample-questions" v-if="currentKb">
+            <div class="sample-questions-header">
+              <span class="sq-title">示例问题</span>
+              <el-button
+                text
+                size="small"
+                :loading="generatingSamples"
+                :disabled="streaming || (currentStats?.documentCount ?? 0) === 0"
+                @click="onGenerateSamples"
+              >
+                {{ currentKb.sampleQuestions && currentKb.sampleQuestions.length > 0 ? '重新生成' : '生成示例问题' }}
+              </el-button>
+            </div>
+            <div class="sample-chips" v-if="currentKb.sampleQuestions && currentKb.sampleQuestions.length > 0">
+              <button
+                v-for="(q, i) in currentKb.sampleQuestions"
+                :key="i"
+                class="sample-chip"
+                :disabled="streaming"
+                @click="onPickSample(q)"
+              >
+                {{ q }}
+              </button>
+            </div>
+            <p class="sample-empty" v-else>
+              尚无示例问题，点击上方按钮基于文档生成
+            </p>
+          </div>
           <div class="welcome-tips">
             <div class="tip">
               <el-icon><Document /></el-icon>
@@ -777,6 +843,55 @@ marked.setOptions({ gfm: true, breaks: true });
 .welcome-tips .tip .el-icon {
   color: var(--lx-primary);
   flex-shrink: 0;
+}
+
+/* ============ R4 示例问题 ============ */
+.sample-questions {
+  margin: 0 0 var(--lx-space-6);
+  text-align: left;
+}
+.sample-questions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--lx-space-2);
+}
+.sample-questions-header .sq-title {
+  font-size: var(--lx-font-sm);
+  color: var(--lx-text-secondary);
+  font-weight: 500;
+}
+.sample-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lx-space-2);
+}
+.sample-chip {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid var(--lx-border);
+  background: var(--lx-bg-elevated);
+  color: var(--lx-text-regular);
+  padding: var(--lx-space-2) var(--lx-space-3);
+  border-radius: var(--lx-radius-md);
+  font-size: var(--lx-font-sm);
+  line-height: 1.5;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.sample-chip:hover:not(:disabled) {
+  border-color: var(--lx-primary);
+  color: var(--lx-primary);
+  background: var(--lx-primary-bg);
+}
+.sample-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.sample-empty {
+  margin: var(--lx-space-3) 0 0;
+  font-size: var(--lx-font-sm);
+  color: var(--lx-text-placeholder);
 }
 
 /* ============ 消息行 ============ */

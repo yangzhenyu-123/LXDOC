@@ -21,6 +21,7 @@ import { createTestDb, TestDb } from './db-helpers';
 import { startMockServer, MockServer, MockChunk } from './mock-server';
 import { RagService, RagEvent } from '../src/knowledge-base/rag.service';
 import { RetrievalService, RetrievalResult } from '../src/knowledge-base/retrieval.service';
+import { RagPromptService } from '../src/knowledge-base/rag-prompt.service';
 import { LlmService } from '../src/llm/llm.service';
 import { GlmProvider } from '../src/llm/providers/glm.provider';
 import { Document, DocumentFormat, ContentSource } from '../src/documents/document.entity';
@@ -64,13 +65,15 @@ describe('T6 RagService.ask 全场景集成测试', () => {
     llmService = new LlmService([glmProvider as any]);
 
     // 真实 RetrievalService（spyOn retrieve 控制阈值场景）
-    retrievalService = new RetrievalService(db.ds.manager, { isReady: () => false } as any);
+    // rerank 默认禁用（isReady=false），测试 RRF 阈值行为
+    retrievalService = new RetrievalService(db.ds.manager, { isReady: () => false } as any, { isReady: () => false } as any);
     retrieveSpy = jest.spyOn(retrievalService, 'retrieve');
 
     // 真实 RagService
     ragService = new RagService(
       retrievalService,
       db.ds.getRepository(Document),
+      new RagPromptService(),
       llmService,
     );
   });
@@ -321,7 +324,7 @@ describe('T6 RagService.ask 全场景集成测试', () => {
     const docRepo = db.ds.getRepository(Document);
     const findSpy = jest.spyOn(docRepo, 'find').mockRejectedValue(new Error('DB 错误'));
     // 重建 RagService 用被 spy 的 repo
-    ragService = new RagService(retrievalService, docRepo, llmService);
+    ragService = new RagService(retrievalService, docRepo, new RagPromptService(), llmService);
 
     const events = await collectEvents(ragService.ask(kbId, '问题'));
 
@@ -424,5 +427,60 @@ describe('T6 RagService.ask 全场景集成测试', () => {
     expect(messages.length).toBeLessThanOrEqual(13);
     // 最近的 A9 必须在
     expect(messages.some((m: any) => m.content === 'A9')).toBe(true);
+  });
+
+  // ========== R1 Rerank 阈值 ==========
+
+  it('R1 rerank 启用时用 rerank 阈值（score=0.04 < rerankAbstain 0.05 → 拒答）', async () => {
+    const { kbId, docId } = await createDocAndKb('文档');
+    // retrieveSpy 返回 score=0.04（RRF 分数），但 rerank 就绪时按 rerank 阈值判断
+    // rerankAbstainThreshold=0.05，0.04 < 0.05 → 拒答
+    retrieveSpy.mockResolvedValue([mkResult(0.04, docId, '内容')]);
+    // 让 retrievalService.isRerankReady() 返回 true
+    jest.spyOn(retrievalService, 'isRerankReady').mockReturnValue(true);
+    mock.setChatResponse([{ type: 'done' }]);
+
+    const events = await collectEvents(ragService.ask(kbId, '问题'));
+    const done = events[events.length - 1] as any;
+    expect(done.type).toBe('done');
+    expect(done.isFallback).toBe(true);
+    expect(done.answer).toContain('未在知识库中找到');
+  });
+
+  it('R1 rerank 启用时 score=0.5 > rerankDegrade 0.15 → 正常回答', async () => {
+    const { kbId, docId } = await createDocAndKb('文档');
+    retrieveSpy.mockResolvedValue([mkResult(0.5, docId, '内容')]);
+    jest.spyOn(retrievalService, 'isRerankReady').mockReturnValue(true);
+    mock.setChatResponse([{ type: 'delta', content: '正常回答' }, { type: 'done' }]);
+
+    const events = await collectEvents(ragService.ask(kbId, '问题'));
+    const done = events[events.length - 1] as any;
+    expect(done.type).toBe('done');
+    expect(done.isFallback).toBe(false);
+  });
+
+  it('R1 rerank 启用时 score=0.1 介于 0.05-0.15 → 降级标注', async () => {
+    const { kbId, docId } = await createDocAndKb('文档');
+    retrieveSpy.mockResolvedValue([mkResult(0.1, docId, '内容')]);
+    jest.spyOn(retrievalService, 'isRerankReady').mockReturnValue(true);
+    mock.setChatResponse([{ type: 'delta', content: '降级回答' }, { type: 'done' }]);
+
+    const events = await collectEvents(ragService.ask(kbId, '问题'));
+    const done = events[events.length - 1] as any;
+    expect(done.type).toBe('done');
+    expect(done.isFallback).toBe(true);
+  });
+
+  it('R1 rerank 未就绪时退回 RRF 阈值（score=0.04 > abstain 0.020 → 正常）', async () => {
+    const { kbId, docId } = await createDocAndKb('文档');
+    retrieveSpy.mockResolvedValue([mkResult(0.04, docId, '内容')]);
+    // isRerankReady 返回 false（默认实现，未 mock）
+    mock.setChatResponse([{ type: 'delta', content: '正常' }, { type: 'done' }]);
+
+    const events = await collectEvents(ragService.ask(kbId, '问题'));
+    const done = events[events.length - 1] as any;
+    expect(done.type).toBe('done');
+    // 0.04 > RRF abstain 0.020 → 不拒答
+    expect(done.isFallback).toBe(false);
   });
 });

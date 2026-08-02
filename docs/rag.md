@@ -615,3 +615,144 @@ P6 完成测试体系后，P7 在已验证的 RAG 基线上叠加三项用户可
 - 后端集成：46 个（原 39 + 新增 7：F1×3 + F2×3 + F3×1）
 - 前端单元：32 个（无新增纯函数，F2/F3/F4 都是组件交互，靠 vue-tsc 类型检查 + 手动验证）
 - **合计 138 个测试，全量 ~22s**
+
+## P8 RAG 能力增强
+
+P8 围绕检索质量与运维弹性做四项增强：rerank 二阶段精排、prompt 模板外置、LLM 多 Provider fallback、示例问题自动生成。所有后端代码与测试已就绪，rerank 容器需用户手动部署（见 R1 末尾）。
+
+### R1 Rerank 二阶段精排
+
+**问题**：RRF 融合后的 topK 仍是粗排，相关性排序仍不够准（向量召回偏语义近似、TRGM 偏字面命中，融合后未必把最相关片段排第一）。
+
+**方案**：在 RRF 融合后加一步 rerank，调 TEI 的 `/rerank` 端点（`bge-reranker-v2-m3`）对候选集做 cross-encoder 精排：
+
+```
+query + chunks → vectorSearch + trgmSearch → RRF 融合 → rerank（可选）→ finalTopK
+```
+
+**关键改动**：
+
+- `rerank.service.ts`（新建）：`RerankService` 封装 TEI `/rerank` 端点，`isReady()` 看 `rerankBaseUrl` 是否配置，`rerank(query, texts)` 返回 `{index, score}[]`
+- `retrieval.service.ts`：构造函数加 `RerankService`，`retrieve()` 在 RRF 融合后判断 `options.rerank === true && rerankService.isReady()`，取 `max(rerankCandidateK, finalTopK)` 个候选送 rerank，按 rerank score 降序取 `finalTopK`
+- `rag.service.ts`：`RagConfig` 加 `useRerank / rerankAbstainThreshold / rerankDegradeThreshold`；`isRerankReady()` 就绪时用 rerank 阈值（abstain 0.05 / degrade 0.15，比 RRF 阈值高，因为 cross-encoder 分数语义更强），否则回落 RRF 阈值（0.02 / 0.03）
+- `llm.config.ts`：加 `rerankBaseUrl / rerankModel / rerankCandidateK`
+- `mock-server.ts`：加 `/rerank` 端点 + `setRerankScores / setRerankError / getRerankRequests`
+- `mock-rerank.ts`（新建）：测试用 mock RerankService 工厂
+
+**部署**（用户手动）：
+
+```bash
+# 在生产机 <PROD_HOST> 上
+docker run -d --name tei-rerank \
+  -p 8082:80 \
+  -v /opt/nexus/html/tei-rerank:/data \
+  ghcr.io/huggingface/text-embeddings-inference:cpu-1.5 \
+  --model-id BAAI/bge-reranker-v2-m3
+
+# 在 server/.env 加
+LLM_RERANK_BASE_URL=http://<PROD_HOST>:8082
+LLM_RERANK_MODEL=BAAI/bge-reranker-v2-m3
+LLM_RERANK_CANDIDATE_K=20
+```
+
+未配置时 `RerankService.isReady()` 返回 false，`retrieve()` 自动跳过 rerank 步骤，回退到纯 RRF，不影响现有行为。
+
+### R2 Prompt 模板外置
+
+**问题**：`buildPrompt` 里的 systemPrompt 和 userPromptTemplate 硬编码在 `rag.utils.ts`，改 prompt 要改代码重新发版，运维不灵活。
+
+**方案**：把 prompt 抽到 `rag-prompts.yaml`，运行时加载，加载失败降级到内置默认（保证不挂）：
+
+```yaml
+systemPrompt: |
+  你是 LXDOC 知识库助手。基于以下检索到的文档片段回答用户问题。
+  若片段未包含答案，明确告知"知识库中未找到相关内容"，不要编造。
+  引用片段时用 [1][2] 上标标注来源。
+
+userPromptTemplate: |
+  检索到的文档片段：
+  {{knowledge}}
+
+  用户问题：{{query}}
+
+  请基于上面的片段回答：
+```
+
+**关键改动**：
+
+- `rag-prompts.yaml`（新建）：`systemPrompt` + `userPromptTemplate`，含 `{{knowledge}} / {{query}}` 占位符
+- `rag-prompt.service.ts`（新建）：极简 YAML block scalar 解析器（无 js-yaml 依赖，只识别 `key: |` 块格式），启动时读 yaml，解析失败或文件不存在降级 `DEFAULT_SYSTEM_PROMPT / DEFAULT_USER_PROMPT_TEMPLATE`
+- `rag.utils.ts`：`buildPrompt` 加 `prompts?` 参数，注入则用外置模板，否则用默认
+- `rag.service.ts`：注入 `RagPromptService`，把 `prompts` 传给 `buildPrompt`
+
+**为什么不用 js-yaml**：避免新增运行时依赖，且当前 yaml 只用 block scalar 一种格式，极简解析器 < 50 行足够；失败降级保证健壮性。
+
+### R3 LLM 多 Provider Fallback
+
+**问题**：原来 `LlmService` 只用一个 Provider，主端点挂了 RAG 整条链路就不可用。
+
+**方案**：`getActiveProviders()` 返回所有就绪 Provider 数组，`chat / streamChat / embed` 遍历 providers，主失败切下一个：
+
+```ts
+for (const p of providers) {
+  try { return await p.chat(msgs, opts); }
+  catch (e) {
+    if (e instanceof LlmNotSupportedException) continue;  // 模型不支持，跳过
+    if (e instanceof LlmUnavailableException) continue;  // 端点不可用，切下一个
+    throw e;  // 其他错误（如 AbortError）直接抛出
+  }
+}
+throw new LlmUnavailableException('所有 LLM Provider 均不可用');
+```
+
+**关键改动**：
+
+- `llm.service.ts`：`getActiveProviders()` 按 `embedding / chat / baseURL` 是否配置过滤；`chat / streamChat / embed` 遍历 providers；`AbortError` 静默结束不切；`LlmNotSupportedException` 静默跳过 embed
+- `llm.service.spec.ts`（新建）：10 个单元测试覆盖 fallback 链（主成功 / 主失败切次 / 全失败抛错 / AbortError 不切 / NotSupportedException 跳过 / getActiveProviders 过滤 / health 用 getActiveProviders）
+- `health()` 改用 `getActiveProviders()`，避免老接口返回单个 Provider 状态
+
+**注意**：`AbortError` 不切下一个 Provider——因为 abort 是用户主动取消，不应误判为端点故障。`LlmNotSupportedException`（如某 Provider 不支持 embed）静默跳过，因为不同 Provider 能力不同。
+
+### R4 示例问题自动生成
+
+**问题**：用户首次进入问答页不知道该问什么，空状态只有静态提示文案，缺乏引导。
+
+**方案**：管理员点一下"生成示例问题"按钮，后端取该 KB 的文档列表，让 LLM 生成 N 个（默认 6）适合该 KB 的问题，存到 `kb.sample_questions`，问答页空状态展示为 chips，点击直接发起提问。
+
+**关键改动**：
+
+- `knowledge-base.entity.ts`：加 `sampleQuestions: string[]`（JSONB, default `'[]'`）
+- `knowledge-base.service.ts`：注入 `LlmService`（`@OptionalLlm()` 装饰器，未配置 LLM 时为 null），加 `generateSampleQuestions(kbId, count=6)`：
+  1. 校验 LLM 就绪 + KB 有文档
+  2. 取文档标题列表拼 prompt（"以下是知识库的文档列表…请生成 N 个用户可能问的问题…"）
+  3. 调 `llmService.chat()`，按行解析，自动去编号前缀（`1. ` / `2、` / `3)` 等都剥掉）
+  4. 存 `kb.sampleQuestions` 并返回
+- `knowledge-base.controller.ts`：加 `POST :id/sample-questions` 端点（query 可选 `count`）
+- 前端 `api/kb.ts`：`KnowledgeBase` 加 `sampleQuestions` 字段，加 `generateSampleQuestions(kbId, count?)` API
+- 前端 `KbAskView.vue`：
+  - 抽出 `doSend(q)` 供 sendQuery 和示例问题 chip 复用
+  - 空状态欢迎区加"示例问题"区块：有 chips 时展示为可点击按钮（点击直接发起提问），无时显示"生成示例问题"按钮
+  - `generatingSamples` loading 状态防重复点击
+  - 文档数为 0 时禁用生成按钮
+
+**Prompt 设计要点**：把文档标题列表喂给 LLM，让 LLM 基于实际文档内容生成贴切问题（而不是泛泛的"什么是 XX"），所以生成的问题与该 KB 真实内容强相关。
+
+### P8 测试统计
+
+- 后端单元：73 个（原 60 + 新增 13：R1×8 + R2×3 + R3×10，部分覆盖既有路径）
+- 后端集成：59 个（原 46 + 新增 13：R1 rerank×6 + R1 阈值×2 + R4×5）
+- 前端单元：32 个（无新增纯函数，靠 vue-tsc 类型检查 + 手动验证）
+- **合计 164 个测试，全量 ~25s**
+
+### P8 配置参考
+
+`server/.env` 新增项（rerank 容器部署后加）：
+
+```env
+# Rerank（TEI /rerank 端点，未配置则跳过 rerank 步骤）
+LLM_RERANK_BASE_URL=http://<PROD_HOST>:8082
+LLM_RERANK_MODEL=BAAI/bge-reranker-v2-m3
+LLM_RERANK_CANDIDATE_K=20
+```
+
+`rag-prompts.yaml`（与 server 同级或 config 目录）—见 R2 章节示例。

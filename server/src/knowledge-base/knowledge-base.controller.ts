@@ -90,6 +90,15 @@ export class KnowledgeBaseController {
     return this.kbService.getChunk(id, chunkId);
   }
 
+  @ApiOperation({ summary: '生成示例问题（R4，LLM 基于文档列表生成）' })
+  @Post(':id/sample-questions')
+  async generateSampleQuestions(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('count') count?: number,
+  ): Promise<string[]> {
+    return this.kbService.generateSampleQuestions(id, count);
+  }
+
   @ApiOperation({ summary: 'RAG 问答（SSE 流式）' })
   @Post(':id/ask')
   async ask(

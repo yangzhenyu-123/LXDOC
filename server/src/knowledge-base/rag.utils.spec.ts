@@ -14,11 +14,14 @@ const DEFAULT_CFG: RagConfig = {
   retrievalTopK: 8,
   abstainThreshold: 0.020,
   degradeThreshold: 0.030,
+  rerankAbstainThreshold: 0.05,
+  rerankDegradeThreshold: 0.15,
   maxChunkChars: 2000,
   maxContextChars: 8000,
   temperature: 0.3,
   maxTokens: 2048,
   llmTimeout: 120_000,
+  useRerank: true,
 };
 
 // 测试用工厂：构造检索结果
@@ -162,6 +165,33 @@ describe('buildPrompt', () => {
     const m2 = buildPrompt('Q2', 'K2');
     expect(m1[1].content).not.toBe(m2[1].content);
     expect(m1[0].content).toBe(m2[0].content); // system 固定
+  });
+
+  it('R2 自定义 prompts：systemPrompt 替换默认', () => {
+    const messages = buildPrompt('Q', 'K', [], {
+      systemPrompt: '你是法规助手',
+      userPromptTemplate: '资料：{{knowledge}}\n问题：{{query}}',
+    });
+    expect(messages[0].content).toBe('你是法规助手');
+    expect(messages[1].content).toContain('资料：K');
+    expect(messages[1].content).toContain('问题：Q');
+  });
+
+  it('R2 userPromptTemplate 占位符替换', () => {
+    const messages = buildPrompt('查询', '资料', [], {
+      systemPrompt: 'sys',
+      userPromptTemplate: '前 {{knowledge}} 中 {{query}} 后',
+    });
+    expect(messages[1].content).toBe('前 资料 中 查询 后');
+  });
+
+  it('R2 省略 prompts 时降级默认模板', () => {
+    const messages = buildPrompt('Q', 'K');
+    expect(messages[0].content).toContain('LXDOC 企业知识库助手');
+    expect(messages[1].content).toContain('参考资料：');
+    expect(messages[1].content).toContain('K');
+    expect(messages[1].content).toContain('用户问题：');
+    expect(messages[1].content).toContain('Q');
   });
 });
 

@@ -14,6 +14,7 @@
  */
 import { createTestDb, TestDb } from './db-helpers';
 import { createMockEmbeddingService, unitVector, deterministicVector } from './mock-embedding';
+import { createMockRerankService } from './mock-rerank';
 import { KnowledgeBaseService } from '../src/knowledge-base/knowledge-base.service';
 import { RetrievalService } from '../src/knowledge-base/retrieval.service';
 import { ChunkingService } from '../src/knowledge-base/chunking.service';
@@ -40,8 +41,10 @@ describe('T5 KnowledgeBaseService + RetrievalService 集成测试', () => {
       chunkingService,
       embeddingService,
       db.ds.manager,
+      // LLM 未启用（generateSampleQuestions 测试单独 mock）
+      { isReady: () => false } as any,
     );
-    retrievalService = new RetrievalService(db.ds.manager, embeddingService);
+    retrievalService = new RetrievalService(db.ds.manager, embeddingService, createMockRerankService({ isReady: false }));
   });
 
   afterEach(async () => {
@@ -294,7 +297,7 @@ describe('T5 KnowledgeBaseService + RetrievalService 集成测试', () => {
       embeddingService = createMockEmbeddingService({
         vectorMap: new Map([['查询', unitVector(0)]]),
       });
-      retrievalService = new RetrievalService(db.ds.manager, embeddingService);
+      retrievalService = new RetrievalService(db.ds.manager, embeddingService, createMockRerankService({ isReady: false }));
 
       const results = await retrievalService.retrieve(kbId, '查询', { vectorTopK: 5, trgmTopK: 5, finalTopK: 5 });
       expect(results.length).toBeGreaterThan(0);
@@ -313,7 +316,7 @@ describe('T5 KnowledgeBaseService + RetrievalService 集成测试', () => {
 
       // embedding 未就绪 → 仅走词法召回
       embeddingService = createMockEmbeddingService({ isReady: false });
-      retrievalService = new RetrievalService(db.ds.manager, embeddingService);
+      retrievalService = new RetrievalService(db.ds.manager, embeddingService, createMockRerankService({ isReady: false }));
 
       const results = await retrievalService.retrieve(kbId, '知识库架构', { trgmTopK: 5, finalTopK: 5 });
       // 第一个 chunk 文本相似度高，应被召回
@@ -334,7 +337,7 @@ describe('T5 KnowledgeBaseService + RetrievalService 集成测试', () => {
       embeddingService = createMockEmbeddingService({
         vectorMap: new Map([['RAG 检索', unitVector(0)]]),
       });
-      retrievalService = new RetrievalService(db.ds.manager, embeddingService);
+      retrievalService = new RetrievalService(db.ds.manager, embeddingService, createMockRerankService({ isReady: false }));
 
       const results = await retrievalService.retrieve(kbId, 'RAG 检索', { vectorTopK: 10, trgmTopK: 10, finalTopK: 10 });
       // X 应排前（both 命中，分数最高）
@@ -352,7 +355,7 @@ describe('T5 KnowledgeBaseService + RetrievalService 集成测试', () => {
       await insertChunk({ kbId, documentId: docId, content: '降级测试内容文本', vector: unitVector(0) });
 
       embeddingService = createMockEmbeddingService({ isReady: false });
-      retrievalService = new RetrievalService(db.ds.manager, embeddingService);
+      retrievalService = new RetrievalService(db.ds.manager, embeddingService, createMockRerankService({ isReady: false }));
 
       const results = await retrievalService.retrieve(kbId, '降级测试', { trgmTopK: 5, finalTopK: 5 });
       expect(results.length).toBeGreaterThan(0);
@@ -380,7 +383,7 @@ describe('T5 KnowledgeBaseService + RetrievalService 集成测试', () => {
       embeddingService = createMockEmbeddingService({
         vectorMap: new Map([['目标词', unitVector(0)]]),
       });
-      retrievalService = new RetrievalService(db.ds.manager, embeddingService);
+      retrievalService = new RetrievalService(db.ds.manager, embeddingService, createMockRerankService({ isReady: false }));
 
       // 不限文档 → 两条都返回
       const all = await retrievalService.retrieve(kbId, '目标词', {
@@ -444,6 +447,283 @@ describe('T5 KnowledgeBaseService + RetrievalService 集成测试', () => {
       const fakeKbId = randomUUID();
       const fakeChunkId = randomUUID();
       await expect(kbService.getChunk(fakeKbId, fakeChunkId)).rejects.toThrow(/不存在/);
+    });
+  });
+
+  // ========== R1 Rerank ==========
+
+  describe('R1 Rerank 二次排序', () => {
+    async function insertChunk(opts: {
+      kbId: string;
+      documentId: string;
+      content: string;
+      vector: number[];
+      headingPath?: string;
+    }): Promise<void> {
+      const vecLiteral = `[${opts.vector.join(',')}]`;
+      await db.ds.query(
+        `INSERT INTO kb_chunks (id, kb_id, document_id, chunk_index, content, heading_path, chunk_type, metadata, embedding)
+         VALUES ($1, $2, $3, 0, $4, $5, 'text', '{}', $6::vector)`,
+        [randomUUID(), opts.kbId, opts.documentId, opts.content, opts.headingPath ?? null, vecLiteral],
+      );
+    }
+
+    it('rerank 启用：按 rerank score 重排（RRF 排第 2 的 chunk 被 rerank 提到第 1）', async () => {
+      const kbId = randomUUID();
+      const docId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+      // 两个 chunk：A 内容与 query 向量近（RRF rank 1），B 内容与 query 词法近（RRF rank 2）
+      await insertChunk({ kbId, documentId: docId, content: '向量召回优先的内容', vector: unitVector(0) });
+      await insertChunk({ kbId, documentId: docId, content: '词法召回优先的内容', vector: unitVector(2) });
+
+      // query embedding 与 A 近（向量召回 A 排前），但 rerank 让 B 排前
+      embeddingService = createMockEmbeddingService({
+        vectorMap: new Map([['查询', unitVector(0)]]),
+      });
+      // rerank score: B(index 1)=0.9, A(index 0)=0.3 → B 排前
+      const rerankService = createMockRerankService({ isReady: true, scores: [0.3, 0.9] });
+      retrievalService = new RetrievalService(db.ds.manager, embeddingService, rerankService);
+
+      const results = await retrievalService.retrieve(kbId, '查询', {
+        vectorTopK: 10, trgmTopK: 10, finalTopK: 5, rerank: true,
+      });
+      expect(results.length).toBe(2);
+      // rerank 后 B（词法召回优先）应排第 1
+      expect(results[0].content).toContain('词法召回优先');
+      expect(results[0].score).toBeCloseTo(0.9, 5);
+      expect(results[1].content).toContain('向量召回优先');
+    });
+
+    it('rerank 未就绪时自动降级为仅 RRF（不报错）', async () => {
+      const kbId = randomUUID();
+      const docId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+      await insertChunk({ kbId, documentId: docId, content: '内容A', vector: unitVector(0) });
+
+      embeddingService = createMockEmbeddingService({
+        vectorMap: new Map([['查询', unitVector(0)]]),
+      });
+      // rerank 未就绪
+      const rerankService = createMockRerankService({ isReady: false });
+      retrievalService = new RetrievalService(db.ds.manager, embeddingService, rerankService);
+
+      const results = await retrievalService.retrieve(kbId, '查询', {
+        vectorTopK: 10, trgmTopK: 10, finalTopK: 5, rerank: true,
+      });
+      // 正常返回，score 是 RRF 分数
+      expect(results.length).toBe(1);
+      expect(results[0].score).toBeGreaterThan(0);
+      expect(results[0].score).toBeLessThan(1); // RRF 分数远小于 1
+    });
+
+    it('rerank 报错时降级为仅 RRF（不阻塞检索）', async () => {
+      const kbId = randomUUID();
+      const docId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+      await insertChunk({ kbId, documentId: docId, content: '内容A', vector: unitVector(0) });
+
+      embeddingService = createMockEmbeddingService({
+        vectorMap: new Map([['查询', unitVector(0)]]),
+      });
+      // rerank 就绪但 rerank 方法抛错
+      const rerankService = createMockRerankService({ isReady: true });
+      (rerankService as any).rerank = jest.fn().mockRejectedValue(new Error('TEI 500'));
+      retrievalService = new RetrievalService(db.ds.manager, embeddingService, rerankService);
+
+      const results = await retrievalService.retrieve(kbId, '查询', {
+        vectorTopK: 10, trgmTopK: 10, finalTopK: 5, rerank: true,
+      });
+      expect(results.length).toBe(1);
+      // 降级为 RRF 分数
+      expect(results[0].score).toBeLessThan(1);
+    });
+
+    it('rerankCandidateK 限制送 rerank 的候选数', async () => {
+      const kbId = randomUUID();
+      const docId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+      // 插 5 个 chunk
+      for (let i = 0; i < 5; i++) {
+        await insertChunk({ kbId, documentId: docId, content: `内容${i}`, vector: unitVector(i % 10) });
+      }
+
+      embeddingService = createMockEmbeddingService({
+        vectorMap: new Map([['查询', unitVector(0)]]),
+      });
+      const rerankService = createMockRerankService({ isReady: true });
+      const rerankSpy = jest.spyOn(rerankService, 'rerank');
+      retrievalService = new RetrievalService(db.ds.manager, embeddingService, rerankService);
+
+      // finalTopK=2, rerankCandidateK=3 → 送 rerank 的候选 = max(3, 2) = 3
+      await retrievalService.retrieve(kbId, '查询', {
+        vectorTopK: 10, trgmTopK: 10, finalTopK: 2, rerank: true, rerankCandidateK: 3,
+      });
+      expect(rerankSpy).toHaveBeenCalledTimes(1);
+      const texts = rerankSpy.mock.calls[0][1];
+      expect(texts.length).toBe(3);
+    });
+  });
+
+  // ========== R4 示例问题生成 ==========
+
+  describe('R4 generateSampleQuestions', () => {
+    it('LLM 未启用时抛 BadRequestException', async () => {
+      const kbId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+      // kbService 默认 llmService 未启用
+      await expect(kbService.generateSampleQuestions(kbId)).rejects.toThrow(/AI 服务未启用/);
+    });
+
+    it('知识库无文档时抛 BadRequestException', async () => {
+      const kbId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+      // 重建 kbService，mock llmService 就绪
+      const mockLlm = {
+        isReady: () => true,
+        chat: jest.fn(),
+      };
+      const newKbService = new KnowledgeBaseService(
+        db.ds.getRepository(KnowledgeBase),
+        db.ds.getRepository(KbChunk),
+        db.ds.getRepository(Document),
+        new ChunkingService(),
+        embeddingService,
+        db.ds.manager,
+        mockLlm as any,
+      );
+      await expect(newKbService.generateSampleQuestions(kbId)).rejects.toThrow(/无文档/);
+    });
+
+    it('正常生成示例问题并存到 kb.sample_questions', async () => {
+      const kbId = randomUUID();
+      const docId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+      // 插一个 chunk（让 listDocuments 返回非空）
+      await db.ds.query(
+        `INSERT INTO kb_chunks (id, kb_id, document_id, chunk_index, content, chunk_type, metadata)
+         VALUES ($1, $2, $3, 0, '内容', 'text', '{}')`,
+        [randomUUID(), kbId, docId],
+      );
+      // 插对应的 document（用 Repository.create 避免漏必填字段）
+      const doc = db.ds.getRepository(Document).create({
+        id: docId,
+        categoryId: randomUUID(),
+        title: 'RAG 架构文档',
+        content: '# 内容',
+        format: 'md' as any,
+        createdBy: userId,
+        contentSource: 'manual' as any,
+      });
+      await db.ds.getRepository(Document).save(doc);
+
+      // mock LLM 返回示例问题
+      const mockLlm = {
+        isReady: () => true,
+        chat: jest.fn().mockResolvedValue({
+          content: '什么是 RAG 架构？\n如何配置检索？\nbge-m3 的维度是多少？',
+          model: 'mock',
+        }),
+      };
+      const newKbService = new KnowledgeBaseService(
+        db.ds.getRepository(KnowledgeBase),
+        db.ds.getRepository(KbChunk),
+        db.ds.getRepository(Document),
+        new ChunkingService(),
+        embeddingService,
+        db.ds.manager,
+        mockLlm as any,
+      );
+
+      const questions = await newKbService.generateSampleQuestions(kbId);
+      expect(questions.length).toBe(3);
+      expect(questions[0]).toContain('RAG');
+      // 验证存到 KB
+      const kb = await newKbService.findOne(kbId);
+      expect(kb.sampleQuestions).toEqual(questions);
+      // 验证 LLM 调用参数
+      expect(mockLlm.chat).toHaveBeenCalledTimes(1);
+      const callArgs = mockLlm.chat.mock.calls[0];
+      expect(callArgs[0][0].role).toBe('user');
+      expect(callArgs[0][0].content).toContain('RAG 架构文档');
+      expect(callArgs[0][0].content).toContain('生成 6 个');
+    });
+
+    it('LLM 返回带编号的问题时自动去编号', async () => {
+      const kbId = randomUUID();
+      const docId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+      await db.ds.query(
+        `INSERT INTO kb_chunks (id, kb_id, document_id, chunk_index, content, chunk_type, metadata)
+         VALUES ($1, $2, $3, 0, '内容', 'text', '{}')`,
+        [randomUUID(), kbId, docId],
+      );
+      const doc = db.ds.getRepository(Document).create({
+        id: docId,
+        categoryId: randomUUID(),
+        title: '文档',
+        content: '# 内容',
+        format: 'md' as any,
+        createdBy: userId,
+        contentSource: 'manual' as any,
+      });
+      await db.ds.getRepository(Document).save(doc);
+
+      const mockLlm = {
+        isReady: () => true,
+        chat: jest.fn().mockResolvedValue({
+          content: '1. 问题一\n2. 问题二\n3、问题三\n4) 问题四',
+          model: 'mock',
+        }),
+      };
+      const newKbService = new KnowledgeBaseService(
+        db.ds.getRepository(KnowledgeBase),
+        db.ds.getRepository(KbChunk),
+        db.ds.getRepository(Document),
+        new ChunkingService(),
+        embeddingService,
+        db.ds.manager,
+        mockLlm as any,
+      );
+
+      const questions = await newKbService.generateSampleQuestions(kbId, 4);
+      expect(questions).toEqual(['问题一', '问题二', '问题三', '问题四']);
+    });
+
+    it('LLM 返回空内容时抛 BadRequestException', async () => {
+      const kbId = randomUUID();
+      const docId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+      await db.ds.query(
+        `INSERT INTO kb_chunks (id, kb_id, document_id, chunk_index, content, chunk_type, metadata)
+         VALUES ($1, $2, $3, 0, '内容', 'text', '{}')`,
+        [randomUUID(), kbId, docId],
+      );
+      const doc = db.ds.getRepository(Document).create({
+        id: docId,
+        categoryId: randomUUID(),
+        title: '文档',
+        content: '# 内容',
+        format: 'md' as any,
+        createdBy: userId,
+        contentSource: 'manual' as any,
+      });
+      await db.ds.getRepository(Document).save(doc);
+
+      const mockLlm = {
+        isReady: () => true,
+        chat: jest.fn().mockResolvedValue({ content: '', model: 'mock' }),
+      };
+      const newKbService = new KnowledgeBaseService(
+        db.ds.getRepository(KnowledgeBase),
+        db.ds.getRepository(KbChunk),
+        db.ds.getRepository(Document),
+        new ChunkingService(),
+        embeddingService,
+        db.ds.manager,
+        mockLlm as any,
+      );
+
+      await expect(newKbService.generateSampleQuestions(kbId)).rejects.toThrow(/生成示例问题失败/);
     });
   });
 });

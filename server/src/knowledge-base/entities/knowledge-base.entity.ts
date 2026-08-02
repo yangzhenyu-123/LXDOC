@@ -58,6 +58,14 @@ export class KnowledgeBase {
   @Column({ name: 'retrieval_config', type: 'jsonb', default: '{}' })
   retrievalConfig: Record<string, any>;
 
+  /**
+   * 示例问题（JSONB，R4 自动生成）
+   * LLM 基于文档列表生成 5-10 个测试问题，前端问答页展示为快捷入口
+   * 数组结构：string[]，如 ["什么是 RAG？", "如何配置检索？"]
+   */
+  @Column({ name: 'sample_questions', type: 'jsonb', default: '[]' })
+  sampleQuestions: string[];
+
   /** 文档总数（冗余计数，避免每次 COUNT(*) 查询） */
   @Column({ name: 'document_count', type: 'int', default: 0 })
   documentCount: number;

@@ -31,6 +31,8 @@ export interface KnowledgeBase {
   embeddingDimensions: number;
   chunkStrategy: Record<string, any>;
   retrievalConfig: Record<string, any>;
+  /** 示例问题（R4 LLM 生成，问答页快捷入口用） */
+  sampleQuestions: string[];
   documentCount: number;
   chunkCount: number;
   createdBy: string;
@@ -186,6 +188,21 @@ export interface ChunkDetail {
 export function getChunk(kbId: string, chunkId: string): Promise<ChunkDetail> {
   return client.get<ChunkDetail, ChunkDetail>(
     `/knowledge-bases/${kbId}/chunks/${chunkId}`,
+  );
+}
+
+/**
+ * 生成示例问题（R4）
+ *
+ * LLM 基于文档列表生成 N 个测试问题，存到 kb.sample_questions。
+ * 前端问答页展示为快捷入口，用户点击直接发起提问。
+ * @param count 生成数量，默认 6
+ * @returns 生成的问题数组
+ */
+export function generateSampleQuestions(kbId: string, count?: number): Promise<string[]> {
+  return client.post<string[], string[]>(
+    `/knowledge-bases/${kbId}/sample-questions`,
+    count !== undefined ? { count } : {},
   );
 }
 

@@ -7,8 +7,10 @@ import { KnowledgeBaseController } from './knowledge-base.controller';
 import { KnowledgeBaseService } from './knowledge-base.service';
 import { ChunkingService } from './chunking.service';
 import { EmbeddingService } from './embedding.service';
+import { RerankService } from './rerank.service';
 import { RetrievalService } from './retrieval.service';
 import { RagService } from './rag.service';
+import { RagPromptService } from './rag-prompt.service';
 import { LlmModule } from '../llm/llm.module';
 
 /**
@@ -18,6 +20,7 @@ import { LlmModule } from '../llm/llm.module';
  * P2: 知识库 CRUD + 文档加入/移出（chunking + embedding + 入库）
  * P3: 混合检索 + RRF
  * P4: RAG 问答（检索 → prompt → GLM 流式 → 引用）
+ * P8: rerank（cross-encoder 二次排序）
  */
 @Module({
   imports: [
@@ -29,13 +32,16 @@ import { LlmModule } from '../llm/llm.module';
     KnowledgeBaseService,
     ChunkingService,
     EmbeddingService,
+    RerankService,
     RetrievalService,
+    RagPromptService,
     RagService,
   ],
   exports: [
     KnowledgeBaseService,
     ChunkingService,
     EmbeddingService,
+    RerankService,
     RetrievalService,
     RagService,
   ],

@@ -4,6 +4,7 @@
  * 起一个 express 服务，模拟两个外部依赖：
  * - POST /chat/completions —— GLM 流式对话，返回可配置的 SSE chunks
  * - POST /embeddings —— TEI embedding，返回可配置的向量
+ * - POST /rerank —— TEI rerank，返回可配置的 relevance scores
  *
  * 测试通过 setChatResponse / setEmbeddingVector 等控制下次响应，
  * 通过 getChatRequests 查询收到的请求做断言。
@@ -46,10 +47,16 @@ export interface MockServer {
   setEmbeddingVector: (vec: number[]) => void;
   /** 配置 /embeddings 返回 HTTP 错误 */
   setEmbeddingError: (status: number, message: string) => void;
+  /** 配置 /rerank 返回的 score 数组（按输入顺序，未排序） */
+  setRerankScores: (scores: number[]) => void;
+  /** 配置 /rerank 返回 HTTP 错误 */
+  setRerankError: (status: number, message: string) => void;
   /** 获取收到的 /chat/completions 请求列表（body + headers） */
   getChatRequests: () => Array<{ body: any; authorization?: string }>;
   /** 获取收到的 /embeddings 请求列表 */
   getEmbedRequests: () => Array<{ body: any; authorization?: string }>;
+  /** 获取收到的 /rerank 请求列表 */
+  getRerankRequests: () => Array<{ body: any; authorization?: string }>;
   /** 重置所有状态（chunks、错误、请求日志） */
   reset: () => void;
 }
@@ -71,8 +78,11 @@ export function startMockServer(port?: number): Promise<MockServer> {
     let chunkDelay = 0;
     let embeddingVec: number[] = Array.from({ length: 1024 }, () => 0.01);
     let embeddingError: ErrorResponse | null = null;
+    let rerankScores: number[] = [];
+    let rerankError: ErrorResponse | null = null;
     let chatRequests: Array<{ body: any; authorization?: string }> = [];
     let embedRequests: Array<{ body: any; authorization?: string }> = [];
+    let rerankRequests: Array<{ body: any; authorization?: string }> = [];
 
     // GLM chat/completions SSE 端点
     app.post('/chat/completions', async (req, res) => {
@@ -120,6 +130,29 @@ export function startMockServer(port?: number): Promise<MockServer> {
       });
     });
 
+    // TEI rerank 端点
+    app.post('/rerank', (req, res) => {
+      rerankRequests.push({
+        body: req.body,
+        authorization: req.headers.authorization as string | undefined,
+      });
+      if (rerankError) {
+        res.status(rerankError.status).json({ error: { message: rerankError.message } });
+        return;
+      }
+      // TEI rerank 返回 { results: [{ index, relevance_score }] }
+      // 测试用 setRerankScores 配置 score 数组（按输入顺序），
+      // 这里转成 results 数组并按 score 降序排列（与真实 TEI 行为一致）
+      const texts: string[] = req.body?.texts ?? [];
+      const scores = rerankScores.length > 0
+        ? rerankScores
+        : texts.map((_, i) => 1 - i * 0.1); // 默认递减，保证第 0 个最高
+      const results = texts
+        .map((_, i) => ({ index: i, relevance_score: scores[i] ?? 0 }))
+        .sort((a, b) => b.relevance_score - a.relevance_score);
+      res.json({ results, model: req.body?.model ?? 'BAAI/bge-reranker-v2-m3' });
+    });
+
     const server = app.listen(port ?? 0, '127.0.0.1');
     server.on('error', reject);
     server.on('listening', () => {
@@ -138,16 +171,22 @@ export function startMockServer(port?: number): Promise<MockServer> {
         setChunkDelay: (ms) => { chunkDelay = ms; },
         setEmbeddingVector: (vec) => { embeddingVec = vec; embeddingError = null; },
         setEmbeddingError: (status, message) => { embeddingError = { status, message }; },
+        setRerankScores: (scores) => { rerankScores = scores; rerankError = null; },
+        setRerankError: (status, message) => { rerankError = { status, message }; },
         getChatRequests: () => [...chatRequests],
         getEmbedRequests: () => [...embedRequests],
+        getRerankRequests: () => [...rerankRequests],
         reset: () => {
           chatChunks = [{ type: 'done' }];
           chatError = null;
           chunkDelay = 0;
           embeddingVec = Array.from({ length: 1024 }, () => 0.01);
           embeddingError = null;
+          rerankScores = [];
+          rerankError = null;
           chatRequests = [];
           embedRequests = [];
+          rerankRequests = [];
         },
       };
       resolve(handle);
