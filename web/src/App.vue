@@ -12,6 +12,7 @@ import KnowledgeTree from '@/components/KnowledgeTree.vue';
 import { useAuthStore } from '@/stores/auth';
 import { changePasswordApi } from '@/api/auth';
 import { getKnowledgeTree } from '@/api/knowledge';
+import { listKbs, type KnowledgeBase } from '@/api/kb';
 
 // LXDOC 根组件：三栏布局
 //  - 顶栏：Logo + 全局搜索 + 上传 + 用户菜单
@@ -23,6 +24,10 @@ const authStore = useAuthStore();
 
 // 全局搜索框输入
 const globalKeyword = ref('');
+
+// RAG 知识库列表（知识库分区入口，点击进入问答）
+const ragKbs = ref<KnowledgeBase[]>([]);
+const ragKbsLoading = ref(false);
 
 // 当前激活的左侧导航分区：docs(文档库) / knowledge(AI知识库) / settings(配置管理)
 type NavZone = 'docs' | 'knowledge' | 'settings';
@@ -281,9 +286,41 @@ function goSettings(menu: 'users' | 'organizations' | 'audit' | 'system' | 'llm'
   }
 }
 
+/**
+ * 加载 RAG 知识库列表（知识库分区入口）
+ */
+async function loadRagKbs() {
+  ragKbsLoading.value = true;
+  try {
+    ragKbs.value = await listKbs();
+  } catch (err: any) {
+    // 静默失败：列表加载失败不阻塞页面，用户切换分区可见空列表
+    console.warn('[kb] 加载知识库列表失败', err);
+    ragKbs.value = [];
+  } finally {
+    ragKbsLoading.value = false;
+  }
+}
+
+/**
+ * 跳转到 RAG 知识库问答页
+ */
+function goKbAsk(id: string) {
+  router.push(`/kb/${id}`);
+}
+
+/**
+ * 跳转到 RAG 知识库管理页（admin）
+ */
+function goKbManage() {
+  router.push('/kb');
+}
+
 // 应用启动时从 localStorage 恢复登录态
 onMounted(() => {
   authStore.restore();
+  // 预加载 RAG 知识库列表（知识库分区入口）
+  void loadRagKbs();
 });
 </script>
 
@@ -418,12 +455,50 @@ onMounted(() => {
             </div>
           </div>
 
-          <!-- AI 知识库：知识树 -->
+          <!-- AI 知识库：RAG 知识库入口 + AI 总结文档树 -->
           <div v-show="activeZone === 'knowledge'" class="panel-section">
             <div class="panel-header">
               <span class="panel-title">AI 知识库</span>
+              <el-button
+                v-if="authStore.isAdmin"
+                text
+                size="small"
+                class="panel-action"
+                @click="goKbManage"
+              >
+                管理
+              </el-button>
             </div>
             <div class="panel-body">
+              <!-- RAG 知识库入口（点击进入问答） -->
+              <div class="kb-section">
+                <div class="kb-section-title">
+                  <el-icon><ChatDotRound /></el-icon>
+                  <span>智能问答</span>
+                </div>
+                <ul class="kb-menu" v-loading="ragKbsLoading">
+                  <li
+                    v-for="kb in ragKbs"
+                    :key="kb.id"
+                    :class="{ active: route.path === `/kb/${kb.id}` }"
+                    :title="kb.description || kb.name"
+                    @click="goKbAsk(kb.id)"
+                  >
+                    <el-icon><ChatLineRound /></el-icon>
+                    <span class="kb-name">{{ kb.name }}</span>
+                    <el-tag v-if="kb.documentCount > 0" size="small" class="kb-count">
+                      {{ kb.documentCount }}
+                    </el-tag>
+                  </li>
+                  <el-empty
+                    v-if="!ragKbsLoading && ragKbs.length === 0"
+                    :image-size="50"
+                    description="暂无知识库"
+                  />
+                </ul>
+              </div>
+              <div class="quick-divider"></div>
+              <!-- AI 总结文档树 -->
               <KnowledgeTree @select="onSelectKnowledge" />
             </div>
           </div>
@@ -701,6 +776,11 @@ onMounted(() => {
   border-bottom: 1px solid var(--lx-border-light);
   flex-shrink: 0;
 }
+.panel-action {
+  margin-left: auto;
+  padding: 4px 8px !important;
+  font-size: var(--lx-font-xs);
+}
 .panel-title {
   font-size: var(--lx-font-sm);
   font-weight: var(--lx-font-semibold);
@@ -777,6 +857,59 @@ onMounted(() => {
   background: linear-gradient(90deg, var(--lx-primary-100), var(--lx-primary-50));
   color: var(--lx-primary-700);
   font-weight: var(--lx-font-semibold);
+}
+
+/* RAG 知识库入口菜单 */
+.kb-section {
+  margin-bottom: var(--lx-space-1);
+}
+.kb-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px var(--lx-space-2);
+  font-size: var(--lx-font-xs);
+  color: var(--lx-text-secondary);
+  font-weight: var(--lx-font-semibold);
+  letter-spacing: 0.5px;
+}
+.kb-menu {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.kb-menu li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--lx-radius-md);
+  cursor: pointer;
+  color: var(--lx-text-regular);
+  font-size: var(--lx-font-sm);
+  transition: all var(--lx-transition-fast);
+}
+.kb-menu li:hover {
+  background: var(--lx-primary-50);
+  color: var(--lx-primary);
+}
+.kb-menu li.active {
+  background: linear-gradient(90deg, var(--lx-primary-100), var(--lx-primary-50));
+  color: var(--lx-primary-700);
+  font-weight: var(--lx-font-semibold);
+}
+.kb-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kb-count {
+  flex-shrink: 0;
 }
 
 /* ============ 主路由区 ============ */

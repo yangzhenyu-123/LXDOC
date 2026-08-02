@@ -44,6 +44,18 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/QuickAccessView.vue'),
   },
   {
+    // RAG 知识库列表 + admin 管理（CRUD + 文档加入/移出）
+    path: '/kb',
+    name: 'kb-list',
+    component: () => import('@/views/KbListView.vue'),
+  },
+  {
+    // RAG 知识库问答界面（核心：SSE 流式 + 引用 + 思考链）
+    path: '/kb/:id',
+    name: 'kb-ask',
+    component: () => import('@/views/KbAskView.vue'),
+  },
+  {
     path: '/admin/users',
     name: 'admin-users',
     component: () => import('@/views/admin/UsersView.vue'),
