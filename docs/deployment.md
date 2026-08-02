@@ -119,6 +119,7 @@ tar czf uploads-$(date +%F).tar.gz uploads/
 
 - **docling 文档解析**（PDF 图片/表格/OCR）：默认关闭，上传回退本地 pdf-parse。需要时改用完整 `docker-compose.yml` 并设 `DOCLING_ENABLED=true`
 - **AI 总结**：默认关闭。需要时在 `.env` 配置 `LLM_ENABLED=true` + `LLM_BASE_URL` 指向内网 GLM 端点
+- **RAG 知识库问答**：默认关闭。需要时叠加 `docker-compose.rag.yml` 启用 TEI 向量服务，详见下文「RAG 知识库问答」
 - **API 调试文档**：默认关闭。需要时在 `.env` 设 `ENABLE_API_DOCS=true`
 
 ### 离线部署（内网无外网）
@@ -189,6 +190,106 @@ docker pull ghcr.io/yangzhenyu-123/lxdoc-pdf2html:latest
 ```
 
 镜像版本列表见 [GHCR Packages](https://github.com/yangzhenyu-123?tab=packages)。onlyoffice / postgres / docling 使用官方镜像，无需自行拉取。
+
+## RAG 知识库问答（TEI 向量服务）
+
+RAG 知识库问答依赖两个向量模型服务（[HuggingFace TEI](https://github.com/huggingface/text-embeddings-inference)）：
+
+- **embedding 服务**（必需）：`BAAI/bge-m3`，1024 维，chunk 向量化与查询向量化
+- **rerank 服务**（可选）：`BAAI/bge-reranker-v2-m3`，cross-encoder 二次精排，提升检索相关性；未配置时自动回退纯 RRF 融合
+
+> 前置条件：`.env` 中 `LLM_ENABLED=true` + `LLM_BASE_URL` 指向内网 GLM 端点（RAG 答案生成由 LLM 完成，向量服务只负责检索）。
+
+### 方式 1：docker-compose.rag.yml overlay（推荐，统一编排）
+
+`docker-compose.rag.yml` 定义 `tei-embed` + `tei-rerank` 两个 sidecar，与主编排叠加启动，backend 通过 compose 内网服务名访问（`http://tei-embed:80`），无需对外暴露端口。
+
+```bash
+# 1. 在 .env 启用 RAG 相关变量
+cat >> .env <<'EOF'
+
+# ===== RAG 知识库问答 =====
+LLM_ENABLED=true
+LLM_BASE_URL=http://your-glm-endpoint/v1
+LLM_API_KEY=your-key
+LLM_MODEL=glm-5.2
+LLM_EMBED_MODEL=BAAI/bge-m3
+LLM_EMBED_DIMENSIONS=1024
+# rerank 可选：留空 LLM_RERANK_BASE_URL 则禁用 rerank（overlay 默认指向 tei-rerank）
+# LLM_RERANK_BASE_URL=
+EOF
+
+# 2. 叠加 overlay 启动
+docker-compose -f docker-compose.yml -f docker-compose.rag.yml up -d
+
+# 3. 永久启用（避免每次输 -f）：在 .env 加
+# COMPOSE_FILE=docker-compose.yml:docker-compose.rag.yml
+# 之后 docker-compose up -d 即同时拉起 RAG 服务
+```
+
+首次启动会从 HuggingFace 下载约 2GB 模型（缓存在 `tei-embed-models` / `tei-rerank-models` volume，重启不重下），`start_period` 给了 180s 启动窗口。查看就绪状态：
+
+```bash
+docker logs -f lxdoc-tei-embed    # 等待 "Ready" 日志
+docker logs -f lxdoc-tei-rerank
+```
+
+### 方式 2：外部已部署的 TEI 服务
+
+若服务器已有独立 TEI 容器（或共享其他机器的 TEI 服务），在 `.env` 直接填端点地址，无需叠加 overlay：
+
+```bash
+cat >> .env <<'EOF'
+LLM_ENABLED=true
+LLM_EMBED_BASE_URL=http://<PROD_HOST>:8081
+LLM_EMBED_MODEL=BAAI/bge-m3
+LLM_EMBED_DIMENSIONS=1024
+LLM_RERANK_BASE_URL=http://<PROD_HOST>:8082
+LLM_RERANK_MODEL=BAAI/bge-reranker-v2-m3
+EOF
+
+# 普通 docker-compose up -d 即可，backend 通过宿主机 IP 访问外部 TEI
+```
+
+> 注意：backend 容器访问宿主机上的 TEI 需确保网络可达。docker 默认 bridge 网络下容器可访问宿主机 IP；如遇连接问题，在 `docker-compose.yml` 的 backend 段加 `extra_hosts: ["host.docker.internal:host-gateway"]` 后用 `http://host.docker.internal:8081`。
+
+### 独立部署 TEI 容器（不用 overlay 时参考）
+
+```bash
+# embedding 服务（必需）
+docker run -d --name tei-embed -p 8081:80 \
+  -v tei-embed-models:/data \
+  ghcr.io/huggingface/text-embeddings-inference:cpu-1.5 \
+  --model-id BAAI/bge-m3 --max-batch-tokens 8192
+
+# rerank 服务（可选）
+docker run -d --name tei-rerank -p 8082:80 \
+  -v tei-rerank-models:/data \
+  ghcr.io/huggingface/text-embeddings-inference:cpu-1.5 \
+  --model-id BAAI/bge-reranker-v2-m3
+```
+
+### 数据库表（自动建表）
+
+RAG 知识库使用 pgvector 扩展，`docker-compose.yml` 的 postgres 已用 `pgvector/pgvector:pg16` 镜像内置。以下表由 TypeORM `synchronize: true` 自动创建（生产环境首次启动后可关闭 synchronize）：
+
+- `kb_chunk` — 知识库 chunk + embedding 向量列
+- `rag_message_feedback` — P9 用户反馈评分表
+
+如需手动建表（幂等 SQL），见 [rag.md P9 章节](./rag.md#候选3-反馈评分与置信度徽章)。
+
+### 验证 RAG 功能
+
+```bash
+# 1. TEI embedding 就绪检查
+curl http://localhost:8081/health    # 方式2；overlay 方式用 docker exec lxdoc-tei-embed wget -qO- localhost/health
+
+# 2. 后端 RAG 配置自检
+curl http://localhost:8080/api/knowledge-base/rag/config -H "Authorization: Bearer <token>"
+# 返回 { "embedReady": true, "rerankReady": true/false, "useRerank": ... }
+
+# 3. 创建知识库 → 上传文档 → 提问，见 web 界面 /knowledge-base
+```
 
 ## CI 自动发布
 
@@ -338,8 +439,12 @@ LXDOC 上传文档采用「docling 为主 + 本地回退」双层解析，支持
 | `LLM_TIMEOUT` | 30000 | 单次请求超时（毫秒），总结任务内部取 max(timeout, 120000)；可在线改 |
 | `LLM_MAX_RETRIES` | 2 | 最大重试次数（指数退避）；可在线改 |
 | `LLM_SUMMARY_MAX_CHARS` | 80000 | 总结单次投喂文本上限（字符数）；可在线改 |
+| `LLM_EMBED_BASE_URL` | （空） | Embedding 服务端点（TEI），留空则 RAG 向量检索禁用（**不可在线改**，仅 env） |
 | `LLM_EMBED_MODEL` | （空） | 向量模型，留空则 RAG 向量检索禁用（**不可在线改**，仅 env） |
 | `LLM_EMBED_DIMENSIONS` | 0 | 向量维度，与 pgvector 列对齐（**不可在线改**，仅 env） |
+| `LLM_RERANK_BASE_URL` | （空） | Rerank 服务端点（TEI），留空则跳过 rerank 回退纯 RRF（**不可在线改**，仅 env） |
+| `LLM_RERANK_MODEL` | BAAI/bge-reranker-v2-m3 | Rerank 模型名（**不可在线改**，仅 env） |
+| `LLM_RERANK_CANDIDATE_K` | 20 | Rerank 候选数，RRF 融合后取 top-K 送 rerank（**不可在线改**，仅 env） |
 
 > `enableThinking` **不是**系统配置，仅是用户级字段（`User.llmEnableThinking`）。admin 回退系统配置时该字段硬编码为 `true`；普通用户必须自己配置（或由 admin 代为配置 `actAsUserId` 代理身份）。详见 [llm.md#用户级配置](./llm.md#用户级配置)。
 

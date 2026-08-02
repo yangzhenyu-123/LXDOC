@@ -68,6 +68,12 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-http://internal-glm/v1}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-glm-5.2}
+      LLM_EMBED_BASE_URL: ${LLM_EMBED_BASE_URL:-}
+      LLM_EMBED_MODEL: ${LLM_EMBED_MODEL:-}
+      LLM_EMBED_DIMENSIONS: ${LLM_EMBED_DIMENSIONS:-0}
+      LLM_RERANK_BASE_URL: ${LLM_RERANK_BASE_URL:-}
+      LLM_RERANK_MODEL: ${LLM_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      LLM_RERANK_CANDIDATE_K: ${LLM_RERANK_CANDIDATE_K:-20}
       # API 调试文档默认关闭，需要时在 .env 设 true
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
       # 首次启动 seed 管理员（生产必填，否则拒绝启动；见 docs/deployment.md）

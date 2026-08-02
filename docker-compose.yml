@@ -79,6 +79,20 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-http://internal-glm/v1}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-glm-5.2}
+      # Embedding 服务（TEI bge-m3 等）：LLM_ENABLED=true 且 RAG 要用，必须配置
+      # 未配置时 KnowledgeBaseService.create 抛错（无法生成 chunk 向量）
+      LLM_EMBED_BASE_URL: ${LLM_EMBED_BASE_URL:-}
+      LLM_EMBED_MODEL: ${LLM_EMBED_MODEL:-}
+      LLM_EMBED_DIMENSIONS: ${LLM_EMBED_DIMENSIONS:-0}
+      # Rerank 服务（TEI bge-reranker-v2-m3 等，可选）：未配置时 RetrievalService.isRerankReady()=false，
+      # RAG 自动跳过 rerank 步骤回退纯 RRF，不影响现有功能
+      LLM_RERANK_BASE_URL: ${LLM_RERANK_BASE_URL:-}
+      LLM_RERANK_MODEL: ${LLM_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      LLM_RERANK_CANDIDATE_K: ${LLM_RERANK_CANDIDATE_K:-20}
+      # LLM 调用超时/重试/摘要长度（可选，有默认值）
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-30000}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
+      LLM_SUMMARY_MAX_CHARS: ${LLM_SUMMARY_MAX_CHARS:-80000}
       # API 调试文档（Swagger UI）：生产默认关闭，需调试时在 .env 设 ENABLE_API_DOCS=true
       # 开启后访问 http://localhost:8080/api/docs
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
