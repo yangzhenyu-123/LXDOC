@@ -33,6 +33,9 @@ import { LlmConfig } from '../src/llm/llm-config.entity';
 import { KnowledgeBase } from '../src/knowledge-base/entities/knowledge-base.entity';
 import { KbChunk } from '../src/knowledge-base/entities/kb-chunk.entity';
 import { MessageFeedback } from '../src/knowledge-base/entities/message-feedback.entity';
+import { KbIngestionRequest } from '../src/kb-ingestion/entities/kb-ingestion-request.entity';
+import { KbIngestionReview } from '../src/kb-ingestion/entities/kb-ingestion-review.entity';
+import { Notification } from '../src/notifications/entities/notification.entity';
 
 /**
  * 从 server/.env 加载环境变量（测试不经过 Nest ConfigModule）
@@ -82,6 +85,9 @@ const ENTITIES = [
   KnowledgeBase,
   KbChunk,
   MessageFeedback,
+  KbIngestionRequest,
+  KbIngestionReview,
+  Notification,
 ];
 
 /** 测试 schema 句柄 */
@@ -109,7 +115,9 @@ export interface TestDb {
 export async function createTestDb(): Promise<TestDb> {
   const schema = `test_${Date.now()}_${randomUUID().slice(0, 8)}`;
 
-  // 1. 先用裸连接 CREATE SCHEMA
+  // 1. 先用裸连接 CREATE SCHEMA + 在 public schema 装扩展（共享）
+  //    扩展装在 public（一次），所有 test schema 通过 search_path=test_xxx,public 可见。
+  //    不能用 SCHEMA "${schema}" + IF NOT EXISTS：IF NOT EXISTS 会让后续测试 schema 装扩展被跳过。
   const bootstrap = new DataSource({
     type: 'postgres',
     ...DB_CONFIG,
@@ -118,6 +126,13 @@ export async function createTestDb(): Promise<TestDb> {
   });
   await bootstrap.initialize();
   await bootstrap.query(`CREATE SCHEMA "${schema}";`);
+  // 扩展装到 public（共享，幂等）：pgcrypto 提供 gen_random_uuid，uuid-ossp 提供 uuid_generate_v4
+  // （MessageFeedback 实体用 @PrimaryGeneratedColumn('uuid')，TypeORM 默认调 uuid_generate_v4），
+  // pg_trgm 提供 GIN trigram 索引，vector 提供 pgvector 类型
+  await bootstrap.query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`);
+  await bootstrap.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto;`);
+  await bootstrap.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm;`);
+  await bootstrap.query(`CREATE EXTENSION IF NOT EXISTS vector;`);
   await bootstrap.destroy();
 
   // 2. 主 DataSource：schema 选项让 TypeORM 建/查表都在该 schema
@@ -161,6 +176,13 @@ export async function createTestDb(): Promise<TestDb> {
   await ds.query(`CREATE INDEX IF NOT EXISTS idx_kb_chunks_embedding_hnsw ON kb_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);`);
   await ds.query(`CREATE INDEX IF NOT EXISTS idx_kb_chunks_content_trgm ON kb_chunks USING GIN (content gin_trgm_ops);`);
   await ds.query(`CREATE INDEX IF NOT EXISTS idx_kb_chunks_kb_doc ON kb_chunks (kb_id, document_id);`);
+
+  // 入库审核：partial unique index（与生产 AppModule.onApplicationBootstrap 一致）
+  await ds.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_ingestion_active
+    ON kb_ingestion_requests (kb_id, document_id)
+    WHERE status IN ('pending', 'approved');
+  `);
 
   return {
     ds,

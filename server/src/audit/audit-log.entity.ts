@@ -29,6 +29,11 @@ export enum AuditAction {
   KB_DOCUMENT_ADD = 'kb_document_add',
   KB_DOCUMENT_REMOVE = 'kb_document_remove',
   KB_EXPORT = 'kb_export',
+  // 知识库入库审核（与 addDocument 区分：审核动作留痕）
+  KB_INGESTION_CREATE = 'kb_ingestion_create',
+  KB_INGESTION_APPROVE = 'kb_ingestion_approve',
+  KB_INGESTION_REJECT = 'kb_ingestion_reject',
+  KB_INGESTION_REVOKE = 'kb_ingestion_revoke',
 }
 
 /**

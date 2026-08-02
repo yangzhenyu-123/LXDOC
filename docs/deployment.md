@@ -285,10 +285,44 @@ EOF
 
 RAG 知识库使用 pgvector 扩展，`docker-compose.yml` 的 postgres 已用 `pgvector/pgvector:pg16` 镜像内置。以下表由 TypeORM `synchronize: true` 自动创建（生产环境首次启动后可关闭 synchronize）：
 
-- `kb_chunk` — 知识库 chunk + embedding 向量列
-- `rag_message_feedback` — P9 用户反馈评分表
+- `kb_knowledge_bases` — 知识库元数据（含 `require_review` 字段控制是否启用入库审核）
+- `kb_chunks` — 知识库 chunk + embedding 向量列（HNSW + GIN trgm 索引）
+- `kb_ingestion_requests` — 入库审核申请（partial unique index：同一 KB+文档同时仅一个活跃申请）
+- `kb_ingestion_reviews` — 审核意见记录（每申请每审核人最多一条）
+- `notifications` — 站内通知（审核通知、入库完成通知等）
+- `message_feedback` — P9 用户反馈评分表
 
-如需手动建表（幂等 SQL），见 [rag.md P9 章节](./rag.md#候选3-反馈评分与置信度徽章)。
+> 入库审核 partial unique index 由 `AppModule.onApplicationBootstrap` 显式创建：
+> ```sql
+> CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_ingestion_active
+> ON kb_ingestion_requests (kb_id, document_id) WHERE status IN ('pending','approved');
+> ```
+
+### 入库审核工作流（KB.requireReview）
+
+知识库默认 `requireReview=false`：`POST /api/knowledge-bases/:id/documents` 直接入库（admin 权限）。
+设为 `true` 后，组员通过 `POST /api/kb-ingestion/requests` 发起入库申请，进入审核流：
+
+```
+申请人创建申请 (pending)
+   ├─ 审核人 approve (first-write-wins) → approved → 触发入库 → done（通知申请人）
+   ├─ 审核人 reject（仅记录意见，不终结）→ 申请人可联系其他审核人 or 撤销
+   └─ 申请人 revoke → revoked → closed
+```
+
+审核人 = 文档 owner 所属组的 `UserOrgRole.admin` ∪ 沿组织 path 上溯各部门的 `UserOrgRole.admin`；
+全局 `UserRole.ADMIN` 始终可审（兜底）。通知仅站内消息，不发送邮件。
+
+相关 API：
+- `POST /api/kb-ingestion/requests` — 创建申请（KB.requireReview=false 时直接入库）
+- `GET  /api/kb-ingestion/requests` — 列表（status/kbId/requesterId 筛选）
+- `GET  /api/kb-ingestion/requests/:id` — 详情（含审核意见）
+- `POST /api/kb-ingestion/requests/:id/approve` — 审核通过（first-write-wins）
+- `POST /api/kb-ingestion/requests/:id/reject` — 审核拒绝（仅记录意见）
+- `POST /api/kb-ingestion/requests/:id/revoke` — 申请人撤销（仅 pending）
+- `GET  /api/kb-ingestion/pending` — 当前用户待审申请
+- `GET /api/notifications` — 通知列表
+- `POST /api/notifications/:id/read` — 标记已读
 
 ### 验证 RAG 功能
 

@@ -23,6 +23,8 @@ import { OrganizationsModule } from './organizations/organizations.module';
 import { LlmModule } from './llm/llm.module';
 import { SystemModule } from './system/system.module';
 import { KnowledgeBaseModule } from './knowledge-base/knowledge-base.module';
+import { NotificationModule } from './notifications/notification.module';
+import { KbIngestionModule } from './kb-ingestion/kb-ingestion.module';
 import { AuditInterceptor } from './audit/audit.interceptor';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
@@ -72,6 +74,10 @@ import { RolesGuard } from './common/guards/roles.guard';
     SystemModule,
     // 知识库模块（pgvector 向量检索 + RAG 问答）
     KnowledgeBaseModule,
+    // 站内通知模块（入库审核通知）
+    NotificationModule,
+    // 知识库入库审核模块
+    KbIngestionModule,
   ],
   providers: [
     // 全局守卫：ThrottlerGuard 限流（最前，防暴力请求穿透认证），
@@ -235,6 +241,22 @@ export class AppModule implements OnApplicationBootstrap {
     } catch (err) {
       this.logger.error(
         `创建 kb_chunks 向量索引失败：${(err as Error).message}`,
+      );
+    }
+
+    // 知识库入库审核：partial unique index
+    // 同一 (kbId, documentId) 同时只允许一个 pending/approved 请求（防并发重复申请）
+    // TypeORM synchronize 不支持 partial index，需显式 SQL 创建。
+    try {
+      await this.entityManager.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_ingestion_active
+        ON kb_ingestion_requests (kb_id, document_id)
+        WHERE status IN ('pending', 'approved');
+      `);
+      this.logger.log('kb_ingestion_requests 活跃申请唯一索引已就绪');
+    } catch (err) {
+      this.logger.error(
+        `创建 kb_ingestion_requests 唯一索引失败：${(err as Error).message}`,
       );
     }
    }

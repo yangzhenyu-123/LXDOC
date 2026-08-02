@@ -200,6 +200,7 @@ export class KnowledgeBaseController {
       description: dto.description,
       categoryId: dto.categoryId,
       chunkStrategy: dto.chunkStrategy,
+      requireReview: dto.requireReview,
       createdBy: user.id,
     });
     await this.auditService.log({

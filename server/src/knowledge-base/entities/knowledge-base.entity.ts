@@ -79,6 +79,19 @@ export class KnowledgeBase {
   @Column({ name: 'created_by', type: 'uuid' })
   createdBy: string;
 
+  /**
+   * 是否要求入库审核
+   * - false（默认）：addDocument 直接入库（向后兼容，admin/editor 均可）
+   * - true         ：组员 addDocument 走审核流（创建入库申请 → 审核 → 入库）
+   *                 admin 仍可通过原端点直接入库（绕过审核）
+   */
+  @Column({
+    name: 'require_review',
+    type: 'boolean',
+    default: false,
+  })
+  requireReview: boolean;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
 

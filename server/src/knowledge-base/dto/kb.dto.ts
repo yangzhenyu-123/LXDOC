@@ -1,4 +1,4 @@
-import { IsArray, IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 /**
  * 创建知识库 DTO
@@ -20,6 +20,11 @@ export class CreateKbDto {
   /** chunk 切分策略（JSON，可选） */
   @IsOptional()
   chunkStrategy?: Record<string, any>;
+
+  /** 是否要求入库审核（默认 false） */
+  @IsOptional()
+  @IsBoolean()
+  requireReview?: boolean;
 }
 
 /**
@@ -45,6 +50,11 @@ export class UpdateKbDto {
 
   @IsOptional()
   retrievalConfig?: Record<string, any>;
+
+  /** 是否要求入库审核 */
+  @IsOptional()
+  @IsBoolean()
+  requireReview?: boolean;
 }
 
 /**

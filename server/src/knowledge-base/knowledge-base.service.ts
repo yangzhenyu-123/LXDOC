@@ -44,6 +44,7 @@ export class KnowledgeBaseService {
     description?: string;
     categoryId?: string;
     chunkStrategy?: Partial<ChunkStrategy>;
+    requireReview?: boolean;
     createdBy: string;
   }): Promise<KnowledgeBase> {
     const kb = this.kbRepo.create({
@@ -51,6 +52,7 @@ export class KnowledgeBaseService {
       description: input.description ?? null,
       categoryId: input.categoryId ?? null,
       chunkStrategy: input.chunkStrategy ?? {},
+      requireReview: input.requireReview ?? false,
       createdBy: input.createdBy,
       documentCount: 0,
       chunkCount: 0,
@@ -70,7 +72,7 @@ export class KnowledgeBaseService {
     return kb;
   }
 
-  async update(id: string, input: Partial<Pick<KnowledgeBase, 'name' | 'description' | 'categoryId' | 'chunkStrategy' | 'retrievalConfig'>>): Promise<KnowledgeBase> {
+  async update(id: string, input: Partial<Pick<KnowledgeBase, 'name' | 'description' | 'categoryId' | 'chunkStrategy' | 'retrievalConfig' | 'requireReview'>>): Promise<KnowledgeBase> {
     const kb = await this.findOne(id);
     Object.assign(kb, input);
     const saved = await this.kbRepo.save(kb);
