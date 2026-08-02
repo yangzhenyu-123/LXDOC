@@ -142,7 +142,9 @@ export class AuthController {
   }
 
   private clearAuthCookies(res: Response): void {
-    res.clearCookie(ACCESS_TOKEN_COOKIE, { path: '/' });
-    res.clearCookie(REFRESH_TOKEN_COOKIE, { path: '/' });
+    // PR review #3 修复：复用与 setAuthCookies 相同的 options，
+    // 确保 httpOnly/sameSite/secure/path/domain 等属性完全匹配，cookie 才能被可靠清除
+    res.clearCookie(ACCESS_TOKEN_COOKIE, accessTokenCookieOptions);
+    res.clearCookie(REFRESH_TOKEN_COOKIE, refreshTokenCookieOptions);
   }
 }

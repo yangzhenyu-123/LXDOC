@@ -110,8 +110,17 @@ export class KnowledgeBaseService {
     const lockKey = `${kbId}:${documentId}`;
     const prev = this.addDocLocks.get(lockKey);
     const current = (async () => {
-      if (prev) await prev.catch(() => undefined);
-      return this.addDocumentInternal(kbId, documentId);
+      try {
+        // 串行化同一 (kbId, documentId)：等待前一个任务完成（忽略其异常）
+        if (prev) await prev.catch(() => undefined);
+        return await this.addDocumentInternal(kbId, documentId);
+      } finally {
+        // PR review #1 修复：任务完成后清理锁 Map，避免长期运行内存泄漏
+        // 仅当 map 中仍注册的是当前 Promise 时才删除，防止后到的并发请求注册的新锁被误删
+        if (this.addDocLocks.get(lockKey) === current) {
+          this.addDocLocks.delete(lockKey);
+        }
+      }
     })();
     this.addDocLocks.set(lockKey, current);
     return current;
@@ -160,7 +169,19 @@ export class KnowledgeBaseService {
 
     // 3. 入库（S3 修复：chunk 删除+插入+计数器全部在事务内，失败回滚不丢旧数据）
     await this.entityManager.transaction(async (manager) => {
-      // 事务内查旧 chunk 数（加行锁防并发）
+      // PR review #2 修复：悲观锁 KnowledgeBase 父行，序列化同 kb 的所有 chunk 写操作。
+      // 选 KB 行而非 chunk 行的原因：chunk 行在首次加入（oldChunkCount=0）时不存在，
+      // FOR UPDATE 锁不到任何行，无法防两个并发"首次加入"都看到 0 并都插入；
+      // KB 行必然存在（findOne 已校验），锁它可正确协调单实例外的并发（多实例部署）。
+      // 单实例下进程内锁已序列化同一 (kbId, documentId)，此处 DB 锁为多实例兜底。
+      await manager
+        .getRepository(KnowledgeBase)
+        .createQueryBuilder('kb')
+        .setLock('pessimistic_write')
+        .where('kb.id = :kbId', { kbId })
+        .getOne();
+
+      // 事务内查旧 chunk 数（KB 行锁已序列化并发，此处 count 无需再加锁）
       const oldChunkCount = await manager
         .getRepository(KbChunk)
         .count({ where: { kbId, documentId } });
@@ -222,9 +243,18 @@ export class KnowledgeBaseService {
   /**
    * 从知识库移除文档（删除其所有 chunk）
    * H4 修复：删除+计数器递减在同一事务内，保证原子性
+   * PR review #2：悲观锁 KB 父行，与 addDocument 协调，防多实例下交错导致计数器错乱
    */
   async removeDocument(kbId: string, documentId: string): Promise<void> {
     await this.entityManager.transaction(async (manager) => {
+      // 悲观锁 KB 行，与 addDocument 共用同一锁顺序，协调跨方法并发
+      await manager
+        .getRepository(KnowledgeBase)
+        .createQueryBuilder('kb')
+        .setLock('pessimistic_write')
+        .where('kb.id = :kbId', { kbId })
+        .getOne();
+
       const result = await manager
         .getRepository(KbChunk)
         .delete({ kbId, documentId });
