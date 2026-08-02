@@ -43,7 +43,8 @@ echo "  ✓ 数据库备份完成 (${DB_SIZE}): ${DB_FILE}"
 if [ -d "${UPLOADS_DIR}" ] && [ "$(ls -A "${UPLOADS_DIR}" 2>/dev/null)" ]; then
   UPLOADS_FILE="${TARGET_DIR}/uploads_${DATE}.tar.gz"
   echo "  → tar 打包 uploads..."
-  tar -czf "${UPLOADS_FILE}" -C "$(dirname "${UPLOADS_DIR}")" "$(basename "${UPLOADS_DIR}")"
+  # H9: --no-unquote 关闭文件名反引号转义解析，避免 UPLOADS_DIR 注入风险
+  tar --no-unquote -czf "${UPLOADS_FILE}" -C "$(dirname "${UPLOADS_DIR}")" "$(basename "${UPLOADS_DIR}")"
   UPLOADS_SIZE=$(du -sh "${UPLOADS_FILE}" | cut -f1)
   echo "  ✓ uploads 备份完成 (${UPLOADS_SIZE}): ${UPLOADS_FILE}"
 else

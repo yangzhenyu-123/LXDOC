@@ -11,6 +11,7 @@ import { KbIngestionService } from './kb-ingestion.service';
 import { KnowledgeBaseModule } from '../knowledge-base/knowledge-base.module';
 import { NotificationModule } from '../notifications/notification.module';
 import { AuditModule } from '../audit/audit.module';
+import { OrganizationsModule } from '../organizations/organizations.module';
 
 /**
  * 知识库入库审核模块
@@ -19,6 +20,7 @@ import { AuditModule } from '../audit/audit.module';
  * - KnowledgeBaseModule：调用 addDocument 触发实际入库
  * - NotificationModule：发站内通知（审核人/申请人）
  * - AuditModule：审计日志（创建/通过/拒绝/撤销）
+ * - OrganizationsModule：AccessControlService 做文档读权限校验（S2 修复）
  *
  * 自己注册 KbIngestionRequest/Review + Organization/UserOrgRole/KnowledgeBase/Document
  * （后四个为只读查询用，与各自模块共存无冲突）。
@@ -36,6 +38,7 @@ import { AuditModule } from '../audit/audit.module';
     KnowledgeBaseModule,
     NotificationModule,
     AuditModule,
+    OrganizationsModule,
   ],
   controllers: [KbIngestionController],
   providers: [KbIngestionService],

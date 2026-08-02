@@ -23,6 +23,11 @@ import { OptionalLlm } from '../llm/optional-llm.decorator';
 @Injectable()
 export class KnowledgeBaseService {
   private readonly logger = new Logger(KnowledgeBaseService.name);
+  /**
+   * 进程内锁：防止同一 (kbId, documentId) 并发 addDocument 导致 chunk 翻倍（H5 修复）
+   * key = `${kbId}:${documentId}`，value = 正在执行的 Promise
+   */
+  private readonly addDocLocks = new Map<string, Promise<unknown>>();
 
   constructor(
     @InjectRepository(KnowledgeBase)
@@ -101,18 +106,30 @@ export class KnowledgeBaseService {
    * @returns 生成的 chunk 数量
    */
   async addDocument(kbId: string, documentId: string): Promise<number> {
+    // H5 修复：进程内锁防止同一 (kbId, documentId) 并发导致 chunk 翻倍
+    const lockKey = `${kbId}:${documentId}`;
+    const prev = this.addDocLocks.get(lockKey);
+    const current = (async () => {
+      try {
+        // 串行化同一 (kbId, documentId)：等待前一个任务完成（忽略其异常）
+        if (prev) await prev.catch(() => undefined);
+        return await this.addDocumentInternal(kbId, documentId);
+      } finally {
+        // PR review #1 修复：任务完成后清理锁 Map，避免长期运行内存泄漏
+        // 仅当 map 中仍注册的是当前 Promise 时才删除，防止后到的并发请求注册的新锁被误删
+        if (this.addDocLocks.get(lockKey) === current) {
+          this.addDocLocks.delete(lockKey);
+        }
+      }
+    })();
+    this.addDocLocks.set(lockKey, current);
+    return current;
+  }
+
+  private async addDocumentInternal(kbId: string, documentId: string): Promise<number> {
     const kb = await this.findOne(kbId);
     const doc = await this.docRepo.findOne({ where: { id: documentId } });
     if (!doc) throw new NotFoundException(`文档 ${documentId} 不存在`);
-
-    // 查旧 chunk 数（判断文档是否已在 KB + 计算 chunkCount 差值）
-    const oldChunkCount = await this.chunkRepo.count({
-      where: { kbId, documentId },
-    });
-    const isExistingDoc = oldChunkCount > 0;
-
-    // 若文档已在此 KB，先清除旧 chunk（重新切分）
-    await this.chunkRepo.delete({ kbId, documentId });
 
     // 文档正文为空（仅预览型格式如 doc/xls），无法加入
     if (!doc.content || !doc.content.trim()) {
@@ -121,26 +138,61 @@ export class KnowledgeBaseService {
       );
     }
 
-    // 1. chunking
+    // 1. chunking（在事务外执行，避免长事务占用连接）
     const strategy = kb.chunkStrategy as Partial<ChunkStrategy> | undefined;
     const chunkResults = this.chunkingService.chunk(doc.content, strategy);
     if (chunkResults.length === 0) {
       throw new BadRequestException(`文档 ${doc.title} 切分后无有效 chunk`);
     }
 
-    // 2. embedding 批量生成
+    // 2. embedding 批量生成（在事务外执行）
     const texts = chunkResults.map((c) => c.content);
     const vectors = await this.embeddingService.embedBatch(texts);
     const successCount = vectors.filter(Boolean).length;
-    this.logger.log(
-      `文档 ${doc.title} embedding：${successCount}/${chunkResults.length} 成功`,
-    );
+    const failedCount = chunkResults.length - successCount;
 
-    // 3. 入库（raw SQL 写 embedding 列，TypeORM 不直接映射 vector 类型）
+    // S6 修复：embedding 全部失败时抛错，避免静默入库无效 chunk
+    if (successCount === 0) {
+      throw new BadRequestException(
+        `文档 ${doc.title} embedding 全部失败（共 ${chunkResults.length} 条），请检查 embedding 服务配置`,
+      );
+    }
+    if (failedCount > 0) {
+      this.logger.warn(
+        `文档 ${doc.title} embedding 部分失败：${failedCount}/${chunkResults.length}，失败 chunk 向量为空（仅词法召回可见）`,
+      );
+    } else {
+      this.logger.log(
+        `文档 ${doc.title} embedding：${successCount}/${chunkResults.length} 成功`,
+      );
+    }
+
+    // 3. 入库（S3 修复：chunk 删除+插入+计数器全部在事务内，失败回滚不丢旧数据）
     await this.entityManager.transaction(async (manager) => {
-      // 先批量插入 chunk（不含 embedding）
-      // 注意：@PrimaryColumn + default 不会让 TypeORM save 后回填 id，
-      //       此处主动生成 uuid，确保后续 UPDATE embedding 能定位到行。
+      // PR review #2 修复：悲观锁 KnowledgeBase 父行，序列化同 kb 的所有 chunk 写操作。
+      // 选 KB 行而非 chunk 行的原因：chunk 行在首次加入（oldChunkCount=0）时不存在，
+      // FOR UPDATE 锁不到任何行，无法防两个并发"首次加入"都看到 0 并都插入；
+      // KB 行必然存在（findOne 已校验），锁它可正确协调单实例外的并发（多实例部署）。
+      // 单实例下进程内锁已序列化同一 (kbId, documentId)，此处 DB 锁为多实例兜底。
+      await manager
+        .getRepository(KnowledgeBase)
+        .createQueryBuilder('kb')
+        .setLock('pessimistic_write')
+        .where('kb.id = :kbId', { kbId })
+        .getOne();
+
+      // 事务内查旧 chunk 数（KB 行锁已序列化并发，此处 count 无需再加锁）
+      const oldChunkCount = await manager
+        .getRepository(KbChunk)
+        .count({ where: { kbId, documentId } });
+      const isExistingDoc = oldChunkCount > 0;
+
+      // 删除旧 chunk（移入事务，失败则回滚，旧数据不丢）
+      if (isExistingDoc) {
+        await manager.getRepository(KbChunk).delete({ kbId, documentId });
+      }
+
+      // 插入新 chunk
       const chunks: KbChunk[] = chunkResults.map((c, i) => ({
         id: randomUUID(),
         kbId,
@@ -156,11 +208,9 @@ export class KnowledgeBaseService {
       const saved = await manager.getRepository(KbChunk).save(chunks);
 
       // 逐条回填 embedding（vector 列用 raw SQL）
-      // 批量构造 VALUES：逐条 UPDATE 在 32 条以内可接受
       for (let i = 0; i < saved.length; i++) {
         const vec = vectors[i];
         if (!vec || vec.length === 0) continue;
-        // 向量格式：'[0.1,0.2,...]'::vector
         const vecLiteral = `[${vec.join(',')}]`;
         await manager.query(
           `UPDATE kb_chunks SET embedding = $1::vector WHERE id = $2`,
@@ -168,8 +218,7 @@ export class KnowledgeBaseService {
         );
       }
 
-      // 更新 KB 计数（T7 修复）
-      // documentCount：仅新文档加入时 +1，重复加入不递增
+      // 更新 KB 计数
       if (!isExistingDoc) {
         await manager.getRepository(KnowledgeBase).increment(
           { id: kbId },
@@ -177,7 +226,6 @@ export class KnowledgeBaseService {
           1,
         );
       }
-      // chunkCount：累加差值（新 - 旧），支持重新切分时 chunk 数变化
       const chunkDelta = saved.length - oldChunkCount;
       if (chunkDelta !== 0) {
         await manager.getRepository(KnowledgeBase).increment(
@@ -194,14 +242,34 @@ export class KnowledgeBaseService {
 
   /**
    * 从知识库移除文档（删除其所有 chunk）
+   * H4 修复：删除+计数器递减在同一事务内，保证原子性
+   * PR review #2：悲观锁 KB 父行，与 addDocument 协调，防多实例下交错导致计数器错乱
    */
   async removeDocument(kbId: string, documentId: string): Promise<void> {
-    const result = await this.chunkRepo.delete({ kbId, documentId });
-    if (result.affected && result.affected > 0) {
-      await this.kbRepo.decrement({ id: kbId }, 'documentCount', 1);
-      await this.kbRepo.decrement({ id: kbId }, 'chunkCount', result.affected);
-      this.logger.log(`文档 ${documentId} 从知识库 ${kbId} 移除（${result.affected} chunk）`);
-    }
+    await this.entityManager.transaction(async (manager) => {
+      // 悲观锁 KB 行，与 addDocument 共用同一锁顺序，协调跨方法并发
+      await manager
+        .getRepository(KnowledgeBase)
+        .createQueryBuilder('kb')
+        .setLock('pessimistic_write')
+        .where('kb.id = :kbId', { kbId })
+        .getOne();
+
+      const result = await manager
+        .getRepository(KbChunk)
+        .delete({ kbId, documentId });
+      if (result.affected && result.affected > 0) {
+        await manager
+          .getRepository(KnowledgeBase)
+          .decrement({ id: kbId }, 'documentCount', 1);
+        await manager
+          .getRepository(KnowledgeBase)
+          .decrement({ id: kbId }, 'chunkCount', result.affected);
+        this.logger.log(
+          `文档 ${documentId} 从知识库 ${kbId} 移除（${result.affected} chunk）`,
+        );
+      }
+    });
   }
 
   /**

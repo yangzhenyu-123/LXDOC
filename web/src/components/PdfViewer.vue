@@ -4,9 +4,9 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import * as pdfjsLib from 'pdfjs-dist';
 
 // 设置 worker：Vite 项目用 new URL 形式，构建时会单独打包 worker chunk
-// 注意：pdfjs-dist v3 的 worker 文件为 .js（v4 改为 .mjs），降级到 v3 需对应调整
+// pdfjs-dist v4 的 worker 文件为 .mjs（v3 为 .js）；S7: 升级 v4 修复 CVE-2024-4367
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.js',
+  'pdfjs-dist/build/pdf.worker.min.mjs',
   import.meta.url,
 ).href;
 

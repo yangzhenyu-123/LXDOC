@@ -288,7 +288,7 @@ export class OnlyOfficeService {
   ): Promise<{ error: 0 | 1 }> {
     // 强制校验回调 JWT：无 token 直接拒绝（回调接口为 @Public，不可跳过）
     try {
-      this.verifyCallbackToken(payload);
+      this.verifyCallbackToken(payload, id);
     } catch (err) {
       this.logger.warn(
         `OnlyOffice 回调 token 校验失败 docId=${id}：${(err as Error).message}`,
@@ -335,10 +335,12 @@ export class OnlyOfficeService {
 
   /**
    * 下载 OnlyOffice 返回的新文件，覆盖原文件并写版本快照
-   * 流程：
-   *  1. fetch payload.url → 写临时文件 → 原子 rename 覆盖 originalPath
+   * S4 修复流程（文件覆盖移入事务后，保证一致性）：
+   *  1. fetch payload.url → 写临时文件（暂存，不覆盖原文件）
    *  2. 事务内 SELECT FOR UPDATE 锁定文档行，写当前 content 快照，version+1
-   *  3. 异步重抽纯文本索引（best-effort，失败仅日志）
+   *  3. 事务成功 → rename 临时文件覆盖原文件
+   *  4. 事务失败 → 删除临时文件，原文件不受影响
+   *  5. 异步重抽纯文本索引（best-effort，失败仅日志）
    *
    * 并发安全：用 SELECT FOR UPDATE 防止 forcesave 与关闭保存并发导致 version 冲突；
    * 文件用 tmp+rename 原子替换，避免写入中途崩溃损坏原文件。
@@ -346,50 +348,58 @@ export class OnlyOfficeService {
   private async applySavedFile(doc: Document, newFileUrl: string): Promise<void> {
     const absPath = path.join(getUploadDir(), doc.originalPath!);
     const buffer = await this.downloadFile(newFileUrl);
-    // 原子替换：先写 .tmp，成功后 rename 覆盖原文件
+    // 暂存到临时文件（不覆盖原文件，等事务成功后再 rename）
     const tmpPath = `${absPath}.tmp-${Date.now()}`;
     await fs.writeFile(tmpPath, buffer);
-    await fs.rename(tmpPath, absPath);
 
-    // 事务内加行锁，保证 version 递增的原子性
-    await this.dataSource.transaction(async (manager) => {
-      const docRepo = manager.getRepository(Document);
-      const versionRepo = manager.getRepository(DocumentVersion);
+    try {
+      // 事务内加行锁，保证 version 递增的原子性
+      await this.dataSource.transaction(async (manager) => {
+        const docRepo = manager.getRepository(Document);
+        const versionRepo = manager.getRepository(DocumentVersion);
 
-      // SELECT ... FOR UPDATE 锁定当前文档行，读取最新 version
-      const locked = await manager
-        .getRepository(Document)
-        .createQueryBuilder('d')
-        .setLock('pessimistic_write')
-        .where('d.id = :id', { id: doc.id })
-        .getOne();
-      if (!locked) {
-        throw new NotFoundException(`文档 ${doc.id} 不存在`);
-      }
-      const currentVersion = locked.version;
+        // SELECT ... FOR UPDATE 锁定当前文档行，读取最新 version
+        const locked = await manager
+          .getRepository(Document)
+          .createQueryBuilder('d')
+          .setLock('pessimistic_write')
+          .where('d.id = :id', { id: doc.id })
+          .getOne();
+        if (!locked) {
+          throw new NotFoundException(`文档 ${doc.id} 不存在`);
+        }
+        const currentVersion = locked.version;
 
-      // 写当前 content 快照（version=当前 version，已存在则跳过）
-      const existing = await versionRepo.findOne({
-        where: { documentId: doc.id, version: currentVersion },
+        // 写当前 content 快照（version=当前 version，已存在则跳过）
+        const existing = await versionRepo.findOne({
+          where: { documentId: doc.id, version: currentVersion },
+        });
+        if (!existing) {
+          await versionRepo.save(
+            versionRepo.create({
+              documentId: doc.id,
+              version: currentVersion,
+              content: doc.content ?? '',
+              snapshotPath: null,
+            }),
+          );
+        }
+
+        // 更新文档：version+1，标记来源为 onlyoffice
+        await docRepo.update(doc.id, {
+          version: currentVersion + 1,
+          contentSource: ContentSource.ONLYOFFICE,
+          updatedAt: new Date(),
+        });
       });
-      if (!existing) {
-        await versionRepo.save(
-          versionRepo.create({
-            documentId: doc.id,
-            version: currentVersion,
-            content: doc.content ?? '',
-            snapshotPath: null,
-          }),
-        );
-      }
 
-      // 更新文档：version+1，标记来源为 onlyoffice
-      await docRepo.update(doc.id, {
-        version: currentVersion + 1,
-        contentSource: ContentSource.ONLYOFFICE,
-        updatedAt: new Date(),
-      });
-    });
+      // 事务成功后才覆盖原文件（原子 rename）
+      await fs.rename(tmpPath, absPath);
+    } catch (err) {
+      // 事务失败：删除暂存文件，原文件不受影响
+      await fs.unlink(tmpPath).catch(() => undefined);
+      throw err;
+    }
 
     // best-effort 重新抽取纯文本索引，失败不阻断保存
     this.refreshIndexText(doc.id).catch((err) => {
@@ -545,9 +555,10 @@ export class OnlyOfficeService {
    * 安全要求：
    * - token 必须存在且签名有效（回调接口为 @Public，不允许跳过）
    * - 解码后比对 status/key/url 与传入 payload 一致，防止 token 复用
+   * - H1 修复：校验 payload.key 中的 docId 与 URL id 匹配，防止跨文档重放覆盖
    * 校验失败抛 BadRequestException
    */
-  private verifyCallbackToken(payload: OnlyOfficeCallbackPayload): void {
+  private verifyCallbackToken(payload: OnlyOfficeCallbackPayload, docId: string): void {
     if (!payload.token) {
       throw new BadRequestException('OnlyOffice 回调缺少 token');
     }
@@ -566,6 +577,10 @@ export class OnlyOfficeService {
       (payload.url !== undefined && decoded?.url !== payload.url)
     ) {
       throw new BadRequestException('OnlyOffice 回调 payload 与 token 不一致');
+    }
+    // H1 修复：校验 key 中的 docId 与 URL id 匹配（key 格式为 `${id}_v${version}`）
+    if (!payload.key || !payload.key.startsWith(`${docId}_v`)) {
+      throw new BadRequestException('OnlyOffice 回调 key 与文档 ID 不匹配');
     }
   }
 }

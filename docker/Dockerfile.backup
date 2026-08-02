@@ -1,6 +1,9 @@
 # LXDOC 备份容器
 # 基于 alpine + postgresql-client，内置 cron 定时执行 pg_dump + uploads tar
 # 镜像小（~30MB），无应用依赖，纯备份用途
+#
+# H9 安全说明：busybox crond 需以 root 运行（写 /etc/crontabs/root、fork 子进程），
+# 故本容器保持 root。已通过 backup.sh 的 tar --no-unquote 防止文件名注入。
 FROM docker.m.daocloud.io/library/alpine:3.19
 
 # 安装 postgresql-client（含 pg_dump/pg_restore）与 tzdata（时区）

@@ -251,14 +251,14 @@ export async function* askStream(
   signal?: AbortSignal,
   options?: { history?: HistoryMessage[]; documentIds?: string[] },
 ): AsyncGenerator<RagEvent, void, unknown> {
-  const token = localStorage.getItem('lxdoc_access_token');
+  // H8 修复：token 改 httpOnly cookie，fetch 需 credentials: 'include' 才会携带
   // baseURL 同 client.ts：/api 由 vite proxy 转发
   const resp = await fetch(`/api/knowledge-bases/${kbId}/ask`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
+    credentials: 'include',
     body: JSON.stringify({
       query,
       ...(options?.history && options.history.length > 0 ? { history: options.history } : {}),

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { LlmConfig } from './llm-config.entity';
@@ -77,7 +77,25 @@ export class LlmConfigService {
     if (!user) throw new NotFoundException('用户不存在');
 
     const update: Partial<User> = {};
-    if (data.baseUrl !== undefined) update.llmBaseUrl = data.baseUrl?.trim() || null;
+    // H3 修复：baseUrl 仅 admin 可配置 + 协议校验，防止普通用户利用 SSRF 探测内网
+    if (data.baseUrl !== undefined) {
+      if (user.role !== UserRole.ADMIN) {
+        throw new ForbiddenException('仅管理员可配置 LLM baseUrl，普通用户请使用系统默认端点');
+      }
+      const url = data.baseUrl?.trim();
+      if (url) {
+        let parsed: URL;
+        try {
+          parsed = new URL(url);
+        } catch {
+          throw new BadRequestException('LLM baseUrl 格式无效');
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw new BadRequestException('LLM baseUrl 仅支持 http/https 协议');
+        }
+      }
+      update.llmBaseUrl = url || null;
+    }
     if (data.model !== undefined) update.llmModel = data.model?.trim() || null;
     if (data.enableThinking !== undefined) update.llmEnableThinking = data.enableThinking;
     // apiKey: '******' 或 undefined 或 '' 视为不修改；其他值更新

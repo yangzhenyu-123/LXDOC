@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -271,13 +272,23 @@ export class AttachmentsService {
   /**
    * 获取附件文件的绝对路径（供 files.controller 下载端点调用）
    * 调用方需自行校验 token（主文档的文件 token）
+   *
+   * 安全：必须传入 docId 并校验 attach.documentId === docId，
+   * 防止用 A 文档的 token 下载 B 文档的附件（IDOR）
    */
-  async getAttachmentAbsPath(attachId: string): Promise<string> {
-    const attach = await this.attachRepo.findOne({ where: { id: attachId } });
+  async getAttachmentAbsPath(attachId: string, docId: string): Promise<string> {
+    const attach = await this.attachRepo.findOne({
+      where: { id: attachId, documentId: docId },
+    });
     if (!attach || attach.attachType !== AttachmentType.FILE || !attach.filePath) {
       throw new NotFoundException(`附件 ${attachId} 不存在或非文件类型`);
     }
-    const absPath = path.join(getUploadDir(), attach.filePath);
+    const absPath = path.normalize(path.join(getUploadDir(), attach.filePath));
+    // 路径穿越纵深防御
+    const uploadDir = path.normalize(getUploadDir());
+    if (absPath !== uploadDir && !absPath.startsWith(uploadDir + path.sep)) {
+      throw new UnauthorizedException('非法的文件路径');
+    }
     return absPath;
   }
 

@@ -1,27 +1,22 @@
 import axios, { type AxiosRequestConfig, type InternalAxiosRequestConfig } from 'axios';
 
-// 全局 axios 实例，baseURL=/api 由 vite proxy 转发到后端 3000 端口
+/**
+ * 全局 axios 实例，baseURL=/api 由 vite proxy 转发到后端 3000 端口
+ *
+ * H8 修复：access/refresh token 改 httpOnly cookie 存储，
+ * - withCredentials: true → 浏览器自动携带 + 接收 Set-Cookie
+ * - 不再注入 Authorization 头（cookie 由后端读取）
+ * - 不再读写 localStorage 中的 token（XSS 无法窃取）
+ * 仅 user 信息仍存 localStorage（非敏感，用于刷新页面恢复 UI 状态）
+ */
 const client = axios.create({
   baseURL: '/api',
   timeout: 30000,
+  withCredentials: true,
 });
 
-// localStorage 持久化键（与 stores/auth.ts 保持一致）
-const LS_ACCESS_TOKEN = 'lxdoc_access_token';
-const LS_REFRESH_TOKEN = 'lxdoc_refresh_token';
+// localStorage 仅持久化 user 信息（非敏感，UI 状态用）
 const LS_USER = 'lxdoc_user';
-
-// 请求拦截器：从 localStorage 注入 Authorization Bearer 令牌
-client.interceptors.request.use(
-  (config: InternalAxiosRequestConfig) => {
-    const token = localStorage.getItem(LS_ACCESS_TOKEN);
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => Promise.reject(error),
-);
 
 // 标记已重试，避免无限重试
 interface RetryableConfig extends InternalAxiosRequestConfig {
@@ -29,9 +24,8 @@ interface RetryableConfig extends InternalAxiosRequestConfig {
 }
 
 // 防并发 refresh：模块级 promise，多个 401 共享同一 refresh
-// 后端 refresh 轮换，返回新的 access + 新的 refresh
-let refreshing: Promise<{ accessToken: string; refreshToken: string }> | null =
-  null;
+// 后端 refresh 轮换，Set-Cookie 自动更新 httpOnly cookie
+let refreshing: Promise<void> | null = null;
 
 // refresh 是否已失败：失败后不再尝试 refresh，直接拒绝并跳转登录
 // 避免会话已失效时大量 401 请求反复触发 refresh 造成风暴
@@ -49,33 +43,15 @@ function redirectToLogin(): void {
 }
 
 /**
- * 清空本地鉴权态
+ * 清空本地 user 信息（token 已在 httpOnly cookie，由后端 logout 清除）
  */
 function clearLocalAuth(): void {
-  localStorage.removeItem(LS_ACCESS_TOKEN);
-  localStorage.removeItem(LS_REFRESH_TOKEN);
   localStorage.removeItem(LS_USER);
 }
 
 /**
- * 同步 pinia store 的 tokens（refresh 成功后调用）
- * 动态 import 规避 client ↔ store 循环依赖
- */
-async function syncStoreTokens(
-  accessToken: string,
-  refreshToken: string,
-): Promise<void> {
-  try {
-    const { useAuthStore } = await import('@/stores/auth');
-    useAuthStore().setTokens(accessToken, refreshToken);
-  } catch (e) {
-    // store 未就绪（应用启动早期），忽略；localStorage 已更新
-    console.warn('[client] sync store tokens failed', e);
-  }
-}
-
-/**
  * 通知 store 强制登出（refresh 失败时调用）
+ * 动态 import 规避 client ↔ store 循环依赖
  */
 async function syncStoreForceLogout(): Promise<void> {
   try {
@@ -94,6 +70,7 @@ export function resetRefreshFailure(): void {
 }
 
 // 响应拦截器：成功返回 response.data；401 触发 refresh 并重放原请求
+// H8：refresh 依赖 httpOnly cookie 自动携带，无需手动传 token；新 cookie 由后端 Set-Cookie 写入
 client.interceptors.response.use(
   (response) => response.data,
   async (err) => {
@@ -113,38 +90,19 @@ client.interceptors.response.use(
         return Promise.reject(err);
       }
       original._retry = true;
-      const refreshToken = localStorage.getItem(LS_REFRESH_TOKEN);
-      if (!refreshToken) {
-        refreshFailed = true;
-        clearLocalAuth();
-        redirectToLogin();
-        return Promise.reject(err);
-      }
       try {
         if (!refreshing) {
           refreshing = import('./auth')
-            .then((m) => m.refreshApi(refreshToken))
-            .then(async (res) => {
-              const newAccess = res?.accessToken;
-              const newRefresh = res?.refreshToken;
-              if (!newAccess || !newRefresh) {
-                throw new Error('refresh 响应缺少 token');
-              }
-              // 持久化轮换后的新 access + 新 refresh token
-              localStorage.setItem(LS_ACCESS_TOKEN, newAccess);
-              localStorage.setItem(LS_REFRESH_TOKEN, newRefresh);
-              // 同步 pinia store（保证页面内响应式状态一致）
-              await syncStoreTokens(newAccess, newRefresh);
-              return { accessToken: newAccess, refreshToken: newRefresh };
+            .then((m) => m.refreshApi())
+            .then(() => {
+              // cookie 已由后端 Set-Cookie 自动更新，无需前端处理
             })
             .finally(() => {
               refreshing = null;
             });
         }
-        const { accessToken: newAccess } = await refreshing;
-        original.headers = original.headers ?? {};
-        (original.headers as Record<string, string>).Authorization =
-          `Bearer ${newAccess}`;
+        await refreshing;
+        // 重放原请求：cookie 自动携带新 access token
         return client(original as AxiosRequestConfig);
       } catch (e) {
         // refresh 失败：标记 + 清空本地态 + 跳登录

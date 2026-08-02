@@ -175,7 +175,7 @@ export class AttachmentsController {
   ): Promise<void> {
     if (!token) throw new UnauthorizedException('缺少文件 token');
     this.filesService.verifyFileToken(token, docId);
-    const absPath = await this.service.getAttachmentAbsPath(attachId);
+    const absPath = await this.service.getAttachmentAbsPath(attachId, docId);
     res.sendFile(absPath);
   }
 }

@@ -24,8 +24,19 @@ import { UserOrgRole, UserOrgRoleValue } from '../organizations/user-org-role.en
 import { KnowledgeBaseService } from '../knowledge-base/knowledge-base.service';
 import { NotificationService } from '../notifications/notification.service';
 import { AuditService } from '../audit/audit.service';
+import { AccessControlService } from '../organizations/access-control.service';
+import { AuthUser } from '../common/decorators/current-user.decorator';
 import { UserRole } from '../users/user.entity';
 import { randomUUID } from 'crypto';
+
+// 构造测试用 AuthUser（admin 角色，S2 修复后 createRequest 需 user 做读权限校验）
+const mockUser: AuthUser = {
+  id: 'u1',
+  role: UserRole.ADMIN,
+  username: 'tester',
+  organizationId: null,
+  orgPath: null,
+};
 
 // helper：构造 mock repository（带链式 QB）
 function mockRepo<T>() {
@@ -65,6 +76,7 @@ describe('KbIngestionService', () => {
   let kbService: { addDocument: jest.Mock };
   let notificationService: { create: jest.Mock; createBatch: jest.Mock };
   let auditService: { log: jest.Mock };
+  let accessControl: { assertCanRead: jest.Mock; assertCanManage: jest.Mock };
   let dataSource: { transaction: jest.Mock };
 
   beforeEach(async () => {
@@ -77,6 +89,10 @@ describe('KbIngestionService', () => {
     kbService = { addDocument: jest.fn() };
     notificationService = { create: jest.fn().mockResolvedValue(null), createBatch: jest.fn().mockResolvedValue(undefined) };
     auditService = { log: jest.fn().mockResolvedValue(undefined) };
+    accessControl = {
+      assertCanRead: jest.fn(),
+      assertCanManage: jest.fn(),
+    };
     dataSource = { transaction: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -91,6 +107,7 @@ describe('KbIngestionService', () => {
         { provide: KnowledgeBaseService, useValue: kbService },
         { provide: NotificationService, useValue: notificationService },
         { provide: AuditService, useValue: auditService },
+        { provide: AccessControlService, useValue: accessControl },
         { provide: DataSource, useValue: dataSource },
       ],
     }).compile();
@@ -110,6 +127,7 @@ describe('KbIngestionService', () => {
         kbId: 'kb1',
         documentId: 'doc1',
         requesterId: 'u1',
+        user: mockUser,
       });
 
       expect(result).toEqual({ ingested: true, chunkCount: 7 });
@@ -146,6 +164,7 @@ describe('KbIngestionService', () => {
         documentId: 'doc1',
         requesterId,
         note: '请审',
+        user: mockUser,
       });
 
       expect(result.ingested).toBe(false);
@@ -167,14 +186,14 @@ describe('KbIngestionService', () => {
       requestRepo.findOne.mockResolvedValue({ id: 'old', status: 'pending' });
 
       await expect(
-        service.createRequest({ kbId: 'kb1', documentId: 'doc1', requesterId: 'u1' }),
+        service.createRequest({ kbId: 'kb1', documentId: 'doc1', requesterId: 'u1', user: mockUser }),
       ).rejects.toThrow(/进行中/);
     });
 
     it('KB 不存在时抛 NotFoundException', async () => {
       kbRepo.findOne.mockResolvedValue(null);
       await expect(
-        service.createRequest({ kbId: 'x', documentId: 'd', requesterId: 'u' }),
+        service.createRequest({ kbId: 'x', documentId: 'd', requesterId: 'u', user: mockUser }),
       ).rejects.toThrow(/不存在/);
     });
 
@@ -182,7 +201,7 @@ describe('KbIngestionService', () => {
       kbRepo.findOne.mockResolvedValue({ id: 'kb1', requireReview: true, name: 'KB' });
       docRepo.findOne.mockResolvedValue(null);
       await expect(
-        service.createRequest({ kbId: 'kb1', documentId: 'd', requesterId: 'u' }),
+        service.createRequest({ kbId: 'kb1', documentId: 'd', requesterId: 'u', user: mockUser }),
       ).rejects.toThrow(/不存在/);
     });
   });

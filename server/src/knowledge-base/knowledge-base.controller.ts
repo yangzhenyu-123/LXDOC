@@ -12,6 +12,7 @@ import {
   Res,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { Response } from 'express';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../users/user.entity';
@@ -123,6 +124,8 @@ export class KnowledgeBaseController {
   }
 
   @ApiOperation({ summary: '生成示例问题（R4，LLM 基于文档列表生成）' })
+  // H10 修复：LLM 接口收紧限流（10 次/分钟/用户），防资源滥用与刷量
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post(':id/sample-questions')
   async generateSampleQuestions(
     @Param('id', ParseUUIDPipe) id: string,
@@ -132,6 +135,8 @@ export class KnowledgeBaseController {
   }
 
   @ApiOperation({ summary: 'RAG 问答（SSE 流式）' })
+  // H10 修复：RAG 问答限流（5 次/分钟/用户），SSE 流式调用成本高，防并发刷量拖垮 LLM 网关
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post(':id/ask')
   async ask(
     @Param('id', ParseUUIDPipe) id: string,

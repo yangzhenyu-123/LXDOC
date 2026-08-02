@@ -44,7 +44,7 @@ export class EmbeddingService {
         results.push(...vectors);
       } catch (err) {
         this.logger.error(
-          `Embedding 批次 ${i / BATCH_SIZE} 失败：${(err as Error).message}`,
+          `Embedding 批次 ${Math.floor(i / BATCH_SIZE) + 1} 失败：${(err as Error).message}`,
         );
         // 失败的批次全部置 null，不阻塞整体
         results.push(...batch.map(() => null));
