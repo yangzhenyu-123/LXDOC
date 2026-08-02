@@ -22,6 +22,15 @@
 # - 模型需预先放入命名卷（docker run --rm -v <卷名>:/data -v <宿主机模型路径>:/src alpine cp -a /src/. /data/）
 # - tei-rerank 若模型未就绪会启动失败，但因 backend 不硬依赖它，不影响主服务
 # - 不需要 rerank 时，在 .env 设 LLM_RERANK_BASE_URL= 留空，backend 自动跳过
+#
+# 模型下载：huggingface.co 国内常被防火墙阻断，通过 HF_ENDPOINT=https://hf-mirror.com 走国内镜像
+# 模型缓存到命名卷后，再次启动无需联网；内网生产机需预先在有网环境下载好模型再传入卷
+#
+# 生产机（内网无外网）部署步骤：
+#   1. 在有外网的开发机执行：HF_ENDPOINT=https://hf-mirror.com docker-compose -f docker-compose.yml -f docker-compose.rag.yml up tei-embed tei-rerank
+#   2. 待模型下载完成（容器日志出现 "Ready" 不再重启），停掉容器
+#   3. 打包卷数据：tar -cf tei-models.tar -C /var/lib/docker/volumes/ lxdoc_tei-embed-models lxdoc_tei-rerank-models
+#   4. 传到生产机 + 解包到对应目录 + docker-compose up -d tei-embed tei-rerank
 
 services:
   # TEI embedding 服务（BAAI/bge-m3，1024 维，CPU 版）
@@ -31,6 +40,11 @@ services:
     container_name: lxdoc-tei-embed
     # bge-m3 模型加载峰值 RSS 约 33GB（192 个 tokenization worker 各持副本）；限制 workers+内存防 OOM
     command: --model-id ${LLM_EMBED_MODEL:-BAAI/bge-m3} --max-batch-tokens 8192 --max-concurrent-requests 64 --tokenization-workers 16
+    environment:
+      # 走国内 HF 镜像下载模型（huggingface.co 国内常被防火墙阻断）；模型已缓存后此变量无效
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      # 模型已缓存时设 HF_HUB_OFFLINE=1 可彻底跳过联网检查；首次下载须留空
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
     volumes:
       - tei-embed-models:/data
     expose:
@@ -51,6 +65,9 @@ services:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.5
     container_name: lxdoc-tei-rerank
     command: --model-id ${LLM_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+    environment:
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
     volumes:
       - tei-rerank-models:/data
     expose:
