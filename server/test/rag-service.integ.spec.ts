@@ -158,6 +158,9 @@ describe('T6 RagService.ask 全场景集成测试', () => {
     expect(done.isFallback).toBe(false);
     // answer 是所有 delta 的拼接（无降级 prefix）
     expect(done.answer).toBe('RAG 架构包含检索和生成');
+    // P9 候选 3：done 事件含 messageId（uuid）+ confidence
+    expect(done.messageId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(done.confidence).toBe('medium'); // 非 rerank + 非 fallback → medium
   });
 
   // ========== 场景 2: 降级回答 ==========
@@ -185,6 +188,9 @@ describe('T6 RagService.ask 全场景集成测试', () => {
     // answer 含 prefix + delta
     expect(done.answer).toContain('相关度较低');
     expect(done.answer).toContain('部分答案');
+    // P9 候选 3：降级回答 confidence=low
+    expect(done.confidence).toBe('low');
+    expect(done.messageId).toMatch(/^[0-9a-f]{8}-/);
   });
 
   // ========== 场景 3: 拒答 ==========
@@ -205,6 +211,9 @@ describe('T6 RagService.ask 全场景集成测试', () => {
     expect(done.answer).toContain('未在知识库中找到');
     // mock-server 未被调用（LLM 未参与）
     expect(mock.getChatRequests()).toHaveLength(0);
+    // P9 候选 3：拒答 confidence=none
+    expect(done.confidence).toBe('none');
+    expect(done.messageId).toMatch(/^[0-9a-f]{8}-/);
   });
 
   it('场景3b 拒答：无检索结果 → done(isFallback=true)', async () => {
@@ -457,6 +466,8 @@ describe('T6 RagService.ask 全场景集成测试', () => {
     const done = events[events.length - 1] as any;
     expect(done.type).toBe('done');
     expect(done.isFallback).toBe(false);
+    // P9 候选 3：rerank 启用 + score=0.5 → confidence=high
+    expect(done.confidence).toBe('high');
   });
 
   it('R1 rerank 启用时 score=0.1 介于 0.05-0.15 → 降级标注', async () => {

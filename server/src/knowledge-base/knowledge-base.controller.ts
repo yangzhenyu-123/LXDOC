@@ -19,7 +19,9 @@ import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorat
 import { KnowledgeBaseService } from './knowledge-base.service';
 import { RetrievalService } from './retrieval.service';
 import { RagService } from './rag.service';
+import { FeedbackService } from './feedback.service';
 import { CreateKbDto, UpdateKbDto, AddDocumentDto, RetrieveDto, AskDto } from './dto/kb.dto';
+import { CreateFeedbackDto } from './dto/feedback.dto';
 
 /**
  * 知识库管理 API
@@ -35,6 +37,7 @@ export class KnowledgeBaseController {
     private readonly kbService: KnowledgeBaseService,
     private readonly retrievalService: RetrievalService,
     private readonly ragService: RagService,
+    private readonly feedbackService: FeedbackService,
   ) {}
 
   // ========== 读操作 ==========
@@ -135,6 +138,25 @@ export class KnowledgeBaseController {
     } finally {
       res.end();
     }
+  }
+
+  // ========== P9 候选 3：消息反馈 ==========
+
+  @ApiOperation({ summary: '提交 RAG 回答反馈（点赞/点踩）' })
+  @Post('feedback')
+  @HttpCode(201)
+  async createFeedback(
+    @Body() dto: CreateFeedbackDto,
+    @CurrentUser() user: AuthUser,
+  ): Promise<{ id: string; rating: number }> {
+    const fb = await this.feedbackService.create(
+      user.id,
+      dto.messageId,
+      dto.kbId,
+      dto.rating,
+      dto.reason,
+    );
+    return { id: fb.id, rating: fb.rating };
   }
 
   // ========== 写操作（admin） ==========

@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import { randomUUID } from 'crypto';
 import { Document } from '../documents/document.entity';
 import { RetrievalService, RetrievalResult } from './retrieval.service';
 import { RagPromptService } from './rag-prompt.service';
@@ -41,11 +42,20 @@ export interface RagReference {
  * - error：错误
  * - cancelled：用户中断
  */
+/**
+ * 置信度等级（P9 候选 3，前端展示用）
+ * - high：rerank score >= 0.5（cross-encoder 强相关）
+ * - medium：正常回答（非降级）
+ * - low：降级回答（isFallback=true）
+ * - none：拒答
+ */
+export type RagConfidence = 'high' | 'medium' | 'low' | 'none';
+
 export type RagEvent =
   | { type: 'references'; refs: RagReference[] }
   | { type: 'reasoning'; content: string }
   | { type: 'delta'; content: string }
-  | { type: 'done'; answer: string; isFallback: boolean }
+  | { type: 'done'; answer: string; isFallback: boolean; messageId: string; confidence: RagConfidence }
   | { type: 'error'; message: string }
   | { type: 'cancelled' };
 
@@ -187,6 +197,8 @@ export class RagService {
         type: 'done',
         answer: '未在知识库中找到相关资料，请尝试换个问法或补充更多上下文。',
         isFallback: true,
+        messageId: randomUUID(),
+        confidence: 'none',
       };
       return;
     }
@@ -289,6 +301,12 @@ export class RagService {
     }
 
     // 8. 完成
-    yield { type: 'done', answer: fullAnswer, isFallback };
+    // 置信度映射：rerank 强相关 → high，正常 → medium，降级 → low
+    const confidence: RagConfidence = isFallback
+      ? 'low'
+      : rerankActive && topScore >= 0.5
+        ? 'high'
+        : 'medium';
+    yield { type: 'done', answer: fullAnswer, isFallback, messageId: randomUUID(), confidence };
   }
 }

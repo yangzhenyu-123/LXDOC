@@ -77,12 +77,15 @@ export interface RagReference {
   hitBy: 'vector' | 'trgm' | 'both';
 }
 
+/** 置信度等级（与后端 RagConfidence 对齐） */
+export type RagConfidence = 'high' | 'medium' | 'low' | 'none';
+
 /** RAG SSE 事件（与后端 RagEvent 对齐） */
 export type RagEvent =
   | { type: 'references'; refs: RagReference[] }
   | { type: 'reasoning'; content: string }
   | { type: 'delta'; content: string }
-  | { type: 'done'; answer: string; isFallback: boolean }
+  | { type: 'done'; answer: string; isFallback: boolean; messageId: string; confidence: RagConfidence }
   | { type: 'error'; message: string }
   | { type: 'cancelled' };
 
@@ -203,6 +206,28 @@ export function generateSampleQuestions(kbId: string, count?: number): Promise<s
   return client.post<string[], string[]>(
     `/knowledge-bases/${kbId}/sample-questions`,
     count !== undefined ? { count } : {},
+  );
+}
+
+/**
+ * 提交 RAG 回答反馈（P9 候选 3）
+ *
+ * 用户对 assistant 回答点赞/点踩，存表用于 RAG 质量评估。
+ * messageId 来自 done 事件的 uuid。同一 (messageId, userId) 后端走 upsert，可改评。
+ * @param kbId 知识库 id
+ * @param messageId RAG done 事件返回的 uuid
+ * @param rating 1=点赞 / -1=点踩
+ * @param reason 点踩理由（rating=-1 时必填）
+ */
+export function createMessageFeedback(
+  kbId: string,
+  messageId: string,
+  rating: 1 | -1,
+  reason?: string,
+): Promise<{ id: string; rating: number }> {
+  return client.post<{ id: string; rating: number }, { id: string; rating: number }>(
+    '/knowledge-bases/feedback',
+    { kbId, messageId, rating, ...(reason ? { reason } : {}) },
   );
 }
 

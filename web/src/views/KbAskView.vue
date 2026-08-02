@@ -2,12 +2,13 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
-import { ArrowLeft, ArrowRight, ArrowDown, ChatLineRound, CircleClose, Document, Promotion } from '@element-plus/icons-vue';
+import { ArrowLeft, ArrowRight, ArrowDown, ChatLineRound, CircleClose, Document, Loading, Promotion } from '@element-plus/icons-vue';
 import { marked } from 'marked';
 import { useAuthStore } from '@/stores/auth';
 import { sanitizeMarkedHtml } from '@/utils/sanitize';
 import { extractRefTokens, replaceRefPlaceholders } from '@/utils/rag-refs';
-import { getKb, askStream, retrieve, listKbs, getKbStats, listKbDocuments, getChunk, generateSampleQuestions, type KnowledgeBase, type KbStats, type KbDocument, type RagEvent, type RagReference, type HistoryMessage, type ChunkDetail } from '@/api/kb';
+import { useStreamSmoother } from '@/composables/useStreamSmoother';
+import { getKb, askStream, retrieve, listKbs, getKbStats, listKbDocuments, getChunk, generateSampleQuestions, createMessageFeedback, type KnowledgeBase, type KbStats, type KbDocument, type RagEvent, type RagReference, type RagConfidence, type HistoryMessage, type ChunkDetail } from '@/api/kb';
 
 /**
  * RAG 知识库问答页（核心）
@@ -55,6 +56,14 @@ interface ChatMessage {
   error?: string;
   // 状态：streaming / done / error / cancelled
   status: 'streaming' | 'done' | 'error' | 'cancelled';
+  // P9 候选 3：done 事件返回的消息 id（用于反馈评分）
+  messageId?: string;
+  // 置信度等级（done 事件返回，前端展示徽章）
+  confidence?: RagConfidence;
+  // 用户已提交的反馈评分：1=点赞 / -1=点踩 / undefined=未反馈
+  feedbackRating?: 1 | -1;
+  // 反馈是否已提交（防重复点击）
+  feedbackSubmitted?: boolean;
 }
 
 const messages = ref<ChatMessage[]>([]);
@@ -87,6 +96,13 @@ const chunkPreviewLoading = ref(false);
 const chunkPreviewData = ref<ChunkDetail | null>(null);
 // 预览弹窗顶部展示的文档标题（从 ref 取，避免再查文档）
 const chunkPreviewDocTitle = ref('');
+
+// ============ P9 候选 2：流式打字机平滑器 ============
+//
+// 解决 SSE 速率不稳定导致"卡顿→突然蹦一大段"的体验问题。
+// pushContent/pushReasoning 累积增量，rAF 节流后通过 onEmit 回调更新 msg。
+// 在 done/cancelled/error 时 flush 强制吐完，避免残留缓冲。
+const streamSmoother = useStreamSmoother();
 
 // ============ 计算属性 ============
 
@@ -168,6 +184,17 @@ async function doSend(q: string) {
   streaming.value = true;
   abortController = new AbortController();
 
+  // 重置 smoother + 注册 emit 回调把增量更新到当前 assistant 消息
+  streamSmoother.reset();
+  streamSmoother.onEmit((delta) => {
+    const m = messages.value[streamingIdx.value];
+    if (!m) return;
+    if (delta.content) m.content += delta.content;
+    if (delta.reasoning) m.reasoning = (m.reasoning ?? '') + delta.reasoning;
+    // 触发自动滚动（rAF 节流后渲染）
+    scheduleAutoScroll();
+  });
+
   // 构造历史对话（多轮对话）：取已完成的 user + assistant 消息对
   // 过滤掉 streaming/error/cancelled 状态的 assistant 消息（未完成的不传）
   const history: HistoryMessage[] = [];
@@ -202,6 +229,8 @@ async function doSend(q: string) {
       }
     }
   } finally {
+    // 流式结束：强制吐完 smoother 缓冲，避免残留字符不显示
+    streamSmoother.flush();
     streaming.value = false;
     abortController = null;
     // 流结束后折叠思考链（用户可手动展开回顾）
@@ -215,6 +244,9 @@ async function doSend(q: string) {
 
 /**
  * 处理单个 SSE 事件，更新当前 assistant 消息
+ *
+ * P9 候选 2：delta/reasoning 事件改为推入 smoother（rAF 节流 emit），
+ * 不再直接累加 msg.content。done/cancelled/error 时由 finally 中 flush 强制吐完。
  */
 function handleEvent(evt: RagEvent, msg: ChatMessage, idx: number) {
   switch (evt.type) {
@@ -226,14 +258,16 @@ function handleEvent(evt: RagEvent, msg: ChatMessage, idx: number) {
       }
       break;
     case 'reasoning':
-      msg.reasoning = (msg.reasoning ?? '') + evt.content;
+      streamSmoother.pushReasoning(evt.content);
       break;
     case 'delta':
-      msg.content += evt.content;
+      streamSmoother.pushContent(evt.content);
       break;
     case 'done':
       msg.content = evt.answer; // 用后端最终 answer 校正（与 delta 拼接应一致）
       msg.isFallback = evt.isFallback;
+      msg.messageId = evt.messageId;
+      msg.confidence = evt.confidence;
       msg.status = 'done';
       break;
     case 'error':
@@ -267,6 +301,81 @@ function clearChat() {
   messages.value = [];
 }
 
+// ============ P9 候选 3：消息反馈 ============
+
+/** 点踩理由弹窗状态 */
+const feedbackDialogVisible = ref(false);
+const feedbackDialogReason = ref('');
+const feedbackDialogLoading = ref(false);
+// 当前正在提交反馈的消息索引 + 待提交的 rating
+let pendingFeedbackIdx = -1;
+let pendingFeedbackRating: 1 | -1 = 1;
+
+/**
+ * 提交反馈：点赞直接发，点踩先弹窗写理由
+ */
+async function onSubmitFeedback(idx: number, rating: 1 | -1) {
+  const msg = messages.value[idx];
+  if (!msg || !msg.messageId || !currentKb.value || msg.feedbackSubmitted) return;
+
+  if (rating === -1) {
+    // 点踩先弹窗
+    pendingFeedbackIdx = idx;
+    pendingFeedbackRating = -1;
+    feedbackDialogReason.value = '';
+    feedbackDialogVisible.value = true;
+    return;
+  }
+
+  // 点赞直接提交
+  await doSubmitFeedback(idx, 1);
+}
+
+/**
+ * 点踩弹窗确认提交
+ */
+async function onConfirmFeedback() {
+  if (pendingFeedbackIdx < 0) return;
+  const reason = feedbackDialogReason.value.trim();
+  if (!reason) {
+    ElMessage.warning('请填写不满意的原因');
+    return;
+  }
+  await doSubmitFeedback(pendingFeedbackIdx, -1, reason);
+  feedbackDialogVisible.value = false;
+}
+
+/**
+ * 实际调用 API 提交反馈
+ */
+async function doSubmitFeedback(idx: number, rating: 1 | -1, reason?: string) {
+  const msg = messages.value[idx];
+  if (!msg || !msg.messageId || !currentKb.value) return;
+
+  feedbackDialogLoading.value = true;
+  try {
+    await createMessageFeedback(currentKb.value.id, msg.messageId, rating, reason);
+    msg.feedbackRating = rating;
+    msg.feedbackSubmitted = true;
+    ElMessage.success(rating === 1 ? '感谢反馈' : '已记录您的反馈');
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.message ?? '提交反馈失败');
+  } finally {
+    feedbackDialogLoading.value = false;
+  }
+}
+
+/** 置信度徽章元数据 */
+function confidenceMeta(c?: RagConfidence): { text: string; cls: string } | null {
+  if (!c) return null;
+  switch (c) {
+    case 'high': return { text: '高置信', cls: 'confidence-high' };
+    case 'medium': return { text: '中置信', cls: 'confidence-medium' };
+    case 'low': return { text: '低置信', cls: 'confidence-low' };
+    case 'none': return { text: '无引用', cls: 'confidence-none' };
+  }
+}
+
 // ============ UI 辅助 ============
 
 async function scrollToBottom() {
@@ -278,38 +387,150 @@ async function scrollToBottom() {
 }
 
 /**
- * 渲染 markdown 为安全 HTML
- * 引用标注 [1][2] 转为可点击的上标链接
+ * rAF 节流的自动滚动：smoother 每个 emit 帧都触发会过频，
+ * 用 rAF 合并到下一帧统一滚动一次。
  */
-function renderAnswer(md: string, msgIdx: number): string {
+let autoScrollScheduled = false;
+function scheduleAutoScroll() {
+  if (autoScrollScheduled) return;
+  autoScrollScheduled = true;
+  requestAnimationFrame(() => {
+    autoScrollScheduled = false;
+    const el = chatScrollRef.value;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+}
+
+/**
+ * 渲染 markdown 为安全 HTML
+ * P9 候选 1：引用 [1][2] 转为带文档名 + 图标的 pill（hover 悬浮卡 + 点击高亮底部引用）
+ */
+function renderAnswer(md: string, msgIdx: number, refs?: RagReference[]): string {
   if (!md) return '';
   // 引用替换逻辑提取为纯函数（src/utils/rag-refs.ts），便于单元测试
   const { preprocessed, tokens } = extractRefTokens(md);
   const html = marked.parse(preprocessed, { async: false }) as string;
   const safe = sanitizeMarkedHtml(html);
-  return replaceRefPlaceholders(safe, tokens, msgIdx);
+  return replaceRefPlaceholders(safe, tokens, msgIdx, refs);
 }
 
 /**
- * 点击引用上标：滚动到引用列表并高亮
+ * 点击引用 pill：滚动到引用列表并高亮
+ * P9 候选 1：支持点击 pill（rag-ref-pill）和旧上标（rag-ref-tag）
  */
 function onAnswerClick(e: MouseEvent) {
-  const target = e.target as HTMLElement;
-  if (target?.classList?.contains('rag-ref-tag')) {
-    const refId = Number(target.dataset.ref);
-    const msgIdx = Number(target.dataset.msg);
-    // 展开引用列表
-    refsExpanded.value[msgIdx] = true;
-    // 滚动到对应引用项并高亮
-    nextTick(() => {
-      const item = document.querySelector(`[data-ref-item="${msgIdx}-${refId}"]`);
-      if (item) {
-        item.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        item.classList.add('ref-highlight');
-        setTimeout(() => item.classList.remove('ref-highlight'), 1500);
+  const target = (e.target as HTMLElement)?.closest('.rag-ref-pill, .rag-ref-tag') as HTMLElement | null;
+  if (!target) return;
+  const refId = Number(target.dataset.ref);
+  const msgIdx = Number(target.dataset.msg);
+  if (!refId || Number.isNaN(msgIdx)) return;
+  // 展开引用列表
+  refsExpanded.value[msgIdx] = true;
+  // 滚动到对应引用项并高亮
+  nextTick(() => {
+    const item = document.querySelector(`[data-ref-item="${msgIdx}-${refId}"]`);
+    if (item) {
+      item.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      item.classList.add('ref-highlight');
+      setTimeout(() => item.classList.remove('ref-highlight'), 1500);
+    }
+  });
+}
+
+// ============ P9 候选 1：引用悬浮卡 ============
+//
+// hover pill 时拉取 chunk 全文显示在 pill 下方悬浮卡，会话级缓存避免重复请求。
+// 鼠标移开 pill 时延迟 200ms 关闭，让用户能移到 popover 上点击"查看全文"。
+const citationPopoverVisible = ref(false);
+const citationPopoverPos = ref({ x: 0, y: 0 });
+const citationPopoverData = ref<ChunkDetail | null>(null);
+const citationPopoverLoading = ref(false);
+const citationPopoverTitle = ref('');
+// 会话级 chunk 缓存（key=chunkId，value=ChunkDetail）
+const chunkCache = new Map<string, ChunkDetail>();
+let popoverHideTimer: number | null = null;
+
+function onAnswerMouseEnter(e: MouseEvent) {
+  const target = (e.target as HTMLElement)?.closest('.rag-ref-pill') as HTMLElement | null;
+  if (!target) return;
+  const chunkId = target.dataset.chunkId;
+  const docTitle = target.dataset.docTitle ?? '';
+  if (!chunkId || !currentKb.value) return;
+
+  // 取消隐藏定时器（如果用户从 popover 移回 pill）
+  if (popoverHideTimer !== null) {
+    clearTimeout(popoverHideTimer);
+    popoverHideTimer = null;
+  }
+
+  // 定位悬浮卡到 pill 下方
+  const rect = target.getBoundingClientRect();
+  citationPopoverPos.value = {
+    x: rect.left,
+    y: rect.bottom + window.scrollY + 6,
+  };
+  citationPopoverTitle.value = docTitle;
+  citationPopoverVisible.value = true;
+
+  // 缓存命中直接显示
+  if (chunkCache.has(chunkId)) {
+    citationPopoverData.value = chunkCache.get(chunkId)!;
+    citationPopoverLoading.value = false;
+    return;
+  }
+
+  // 缓存未命中拉取
+  citationPopoverData.value = null;
+  citationPopoverLoading.value = true;
+  getChunk(currentKb.value.id, chunkId)
+    .then((chunk) => {
+      chunkCache.set(chunkId, chunk);
+      // 仅当 popover 仍显示当前 chunk 时才更新（防竞态）
+      if (citationPopoverVisible.value) {
+        citationPopoverData.value = chunk;
+        citationPopoverLoading.value = false;
+      }
+    })
+    .catch(() => {
+      if (citationPopoverVisible.value) {
+        citationPopoverLoading.value = false;
       }
     });
+}
+
+function onAnswerMouseLeave(e: MouseEvent) {
+  const target = (e.target as HTMLElement)?.closest('.rag-ref-pill') as HTMLElement | null;
+  if (!target) return;
+  // 延迟关闭，让用户能移到 popover 上
+  if (popoverHideTimer !== null) clearTimeout(popoverHideTimer);
+  popoverHideTimer = window.setTimeout(() => {
+    citationPopoverVisible.value = false;
+    popoverHideTimer = null;
+  }, 200);
+}
+
+/** 鼠标移入 popover 时取消关闭 */
+function onPopoverEnter() {
+  if (popoverHideTimer !== null) {
+    clearTimeout(popoverHideTimer);
+    popoverHideTimer = null;
   }
+}
+
+/** 鼠标移出 popover 时关闭 */
+function onPopoverLeave() {
+  if (popoverHideTimer !== null) clearTimeout(popoverHideTimer);
+  citationPopoverVisible.value = false;
+}
+
+/** 点击 popover 中"查看全文"按钮：复用现有 chunkPreview 弹窗 */
+function onPopoverViewFull() {
+  if (!citationPopoverData.value) return;
+  openChunkPreview({
+    chunkId: citationPopoverData.value.id,
+    documentTitle: citationPopoverTitle.value,
+  } as any);
+  citationPopoverVisible.value = false;
 }
 
 function toggleRefs(idx: number) {
@@ -580,7 +801,9 @@ marked.setOptions({ gfm: true, breaks: true });
               class="msg-content answer-content"
               :class="{ fallback: msg.isFallback }"
               @click="onAnswerClick"
-              v-html="renderAnswer(msg.content, idx)"
+              @mouseover="onAnswerMouseEnter"
+              @mouseout="onAnswerMouseLeave"
+              v-html="renderAnswer(msg.content, idx, msg.refs)"
             />
 
             <!-- 流式光标 -->
@@ -613,9 +836,68 @@ marked.setOptions({ gfm: true, breaks: true });
               show-icon
               class="error-alert"
             />
+
+            <!-- P9 候选 3：置信度徽章 + 反馈按钮（done 状态才显示） -->
+            <div
+              v-if="msg.status === 'done' && (confidenceMeta(msg.confidence) || msg.messageId)"
+              class="msg-footer"
+            >
+              <span
+                v-if="confidenceMeta(msg.confidence)"
+                class="confidence-badge"
+                :class="confidenceMeta(msg.confidence)!.cls"
+              >
+                {{ confidenceMeta(msg.confidence)!.text }}
+              </span>
+              <template v-if="msg.messageId && currentKb">
+                <span class="footer-divider">·</span>
+                <button
+                  class="feedback-btn"
+                  :class="{ active: msg.feedbackRating === 1 }"
+                  :disabled="msg.feedbackSubmitted && msg.feedbackRating !== 1"
+                  :title="msg.feedbackRating === 1 ? '已点赞' : '点赞'"
+                  @click="onSubmitFeedback(idx, 1)"
+                >
+                  <el-icon><svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 21h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 8.59C7.22 8.95 7 9.45 7 10v9c0 1.1.9 2 2 2zM1 10h4v11H1z"/></svg></el-icon>
+                </button>
+                <button
+                  class="feedback-btn"
+                  :class="{ active: msg.feedbackRating === -1 }"
+                  :disabled="msg.feedbackSubmitted && msg.feedbackRating !== -1"
+                  :title="msg.feedbackRating === -1 ? '已点踩' : '点踩'"
+                  @click="onSubmitFeedback(idx, -1)"
+                >
+                  <el-icon><svg viewBox="0 0 24 24" fill="currentColor"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59C16.78 16.05 17 15.55 17 15V6c0-1.1-.9-2-2-2zM23 6h-4v11h4z"/></svg></el-icon>
+                </button>
+              </template>
+            </div>
           </div>
         </div>
       </div>
+
+      <!-- P9 候选 3：点踩理由弹窗 -->
+      <el-dialog
+        v-model="feedbackDialogVisible"
+        title="反馈不满意原因"
+        width="500"
+        :close-on-click-modal="false"
+      >
+        <el-input
+          v-model="feedbackDialogReason"
+          type="textarea"
+          :rows="4"
+          maxlength="500"
+          show-word-limit
+          placeholder="请描述这条回答的问题，帮我们改进检索质量"
+          @keydown.enter.exact.prevent="onConfirmFeedback"
+        />
+        <template #footer>
+          <el-button @click="feedbackDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="feedbackDialogLoading" @click="onConfirmFeedback">
+            提交
+          </el-button>
+        </template>
+      </el-dialog>
 
       <!-- 输入区 -->
       <div class="input-area">
@@ -694,6 +976,36 @@ marked.setOptions({ gfm: true, breaks: true });
         </div>
       </div>
     </main>
+
+    <!-- P9 候选 1：引用悬浮卡（hover pill 时显示 chunk 预览） -->
+    <Teleport to="body">
+      <div
+        v-if="citationPopoverVisible"
+        class="citation-popover"
+        :style="{ left: `${citationPopoverPos.x}px`, top: `${citationPopoverPos.y}px` }"
+        @mouseenter="onPopoverEnter"
+        @mouseleave="onPopoverLeave"
+      >
+        <div class="popover-header">
+          <el-icon><Document /></el-icon>
+          <span class="popover-title" :title="citationPopoverTitle">{{ citationPopoverTitle }}</span>
+        </div>
+        <div v-if="citationPopoverLoading" class="popover-loading">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span>加载中…</span>
+        </div>
+        <div v-else-if="citationPopoverData" class="popover-content">
+          <div v-if="citationPopoverData.headingPath" class="popover-path">
+            章节：{{ citationPopoverData.headingPath }}
+          </div>
+          <div class="popover-snippet">{{ citationPopoverData.content.slice(0, 240) }}{{ citationPopoverData.content.length > 240 ? '…' : '' }}</div>
+          <el-link type="primary" :underline="false" size="small" class="popover-view-full" @click="onPopoverViewFull">
+            查看全文
+          </el-link>
+        </div>
+        <div v-else class="popover-empty">无法加载引用内容</div>
+      </div>
+    </Teleport>
 
     <!-- F4 引用预览弹窗 -->
     <el-dialog
@@ -1148,6 +1460,48 @@ marked.setOptions({ gfm: true, breaks: true });
   color: var(--lx-primary-700);
   text-decoration: underline;
 }
+/* ============ P9 候选 1：引用 pill 样式 ============ */
+.answer-content :deep(.rag-ref-pill) {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  margin: 0 2px;
+  border-radius: 999px;
+  background: var(--lx-primary-bg, #e3f2fd);
+  border: 1px solid var(--lx-primary-100, #bbdefb);
+  color: var(--lx-primary, #1976d2);
+  font-size: 0.85em;
+  line-height: 1.4;
+  cursor: pointer;
+  vertical-align: baseline;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  user-select: none;
+}
+.answer-content :deep(.rag-ref-pill:hover) {
+  background: var(--lx-primary, #1976d2);
+  color: #fff;
+  border-color: var(--lx-primary, #1976d2);
+}
+.answer-content :deep(.rag-ref-pill .pill-icon) {
+  font-size: 0.95em;
+  line-height: 1;
+}
+.answer-content :deep(.rag-ref-pill .pill-text) {
+  max-width: 12em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.answer-content :deep(.rag-ref-pill .pill-num) {
+  font-size: 0.85em;
+  opacity: 0.75;
+  margin-left: 1px;
+}
+.answer-content :deep(.rag-ref-pill:hover .pill-num) {
+  opacity: 0.9;
+}
 .stream-cursor {
   display: inline-block;
   color: var(--lx-primary);
@@ -1173,6 +1527,75 @@ marked.setOptions({ gfm: true, breaks: true });
 }
 .error-alert {
   margin-top: var(--lx-space-2);
+}
+
+/* ============ P9 候选 3：消息底部置信度 + 反馈 ============ */
+.msg-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--lx-space-2);
+  margin-top: var(--lx-space-3);
+  padding-top: var(--lx-space-2);
+  border-top: 1px dashed var(--lx-border);
+}
+.confidence-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.confidence-high {
+  background: var(--lx-success-bg, #e8f5e9);
+  color: var(--lx-success, #2e7d32);
+}
+.confidence-medium {
+  background: var(--lx-primary-bg, #e3f2fd);
+  color: var(--lx-primary, #1976d2);
+}
+.confidence-low {
+  background: var(--lx-warning-bg, #fff8e1);
+  color: var(--lx-warning, #f57c00);
+}
+.confidence-none {
+  background: var(--lx-bg-secondary, #f5f5f5);
+  color: var(--lx-text-secondary, #757575);
+}
+.footer-divider {
+  color: var(--lx-text-placeholder, #bdbdbd);
+  font-size: 12px;
+}
+.feedback-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  border: none;
+  background: transparent;
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--lx-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  transition: color 0.15s, background 0.15s;
+}
+.feedback-btn:hover:not(:disabled) {
+  background: var(--lx-bg-secondary, #f5f5f5);
+  color: var(--lx-primary);
+}
+.feedback-btn.active {
+  color: var(--lx-primary);
+}
+.feedback-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.feedback-btn .el-icon {
+  font-size: 16px;
+}
+.feedback-btn.active .el-icon svg {
+  filter: drop-shadow(0 0 2px currentColor);
 }
 
 /* ============ 输入区 ============ */
@@ -1211,5 +1634,74 @@ marked.setOptions({ gfm: true, breaks: true });
 /* ============ 空提示 ============ */
 .kb-empty {
   flex: 1;
+}
+
+/* ============ P9 候选 1：引用悬浮卡 ============ */
+.citation-popover {
+  position: absolute;
+  z-index: 2050;
+  width: 360px;
+  max-width: 90vw;
+  background: var(--lx-bg-elevated, #fff);
+  border: 1px solid var(--lx-border, #e0e0e0);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+}
+.popover-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--lx-border, #e0e0e0);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--lx-text, #333);
+}
+.popover-header .el-icon {
+  color: var(--lx-primary);
+  flex-shrink: 0;
+}
+.popover-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.popover-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px;
+  font-size: 12px;
+  color: var(--lx-text-secondary, #757575);
+}
+.popover-content {
+  padding: 10px 12px;
+}
+.popover-path {
+  font-size: 12px;
+  color: var(--lx-text-secondary, #757575);
+  margin-bottom: 6px;
+}
+.popover-snippet {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--lx-text-regular, #555);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+.popover-view-full {
+  font-size: 12px;
+}
+.popover-empty {
+  padding: 12px;
+  font-size: 12px;
+  color: var(--lx-text-placeholder, #9e9e9e);
+  text-align: center;
 }
 </style>

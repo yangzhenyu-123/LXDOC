@@ -18,8 +18,10 @@ import { createMockRerankService } from './mock-rerank';
 import { KnowledgeBaseService } from '../src/knowledge-base/knowledge-base.service';
 import { RetrievalService } from '../src/knowledge-base/retrieval.service';
 import { ChunkingService } from '../src/knowledge-base/chunking.service';
+import { FeedbackService } from '../src/knowledge-base/feedback.service';
 import { KnowledgeBase } from '../src/knowledge-base/entities/knowledge-base.entity';
 import { KbChunk } from '../src/knowledge-base/entities/kb-chunk.entity';
+import { MessageFeedback } from '../src/knowledge-base/entities/message-feedback.entity';
 import { Document, DocumentFormat, ContentSource } from '../src/documents/document.entity';
 import { randomUUID } from 'crypto';
 
@@ -27,6 +29,7 @@ describe('T5 KnowledgeBaseService + RetrievalService 集成测试', () => {
   let db: TestDb;
   let kbService: KnowledgeBaseService;
   let retrievalService: RetrievalService;
+  let feedbackService: FeedbackService;
   let embeddingService: ReturnType<typeof createMockEmbeddingService>;
   const userId = randomUUID();
 
@@ -45,6 +48,7 @@ describe('T5 KnowledgeBaseService + RetrievalService 集成测试', () => {
       { isReady: () => false } as any,
     );
     retrievalService = new RetrievalService(db.ds.manager, embeddingService, createMockRerankService({ isReady: false }));
+    feedbackService = new FeedbackService(db.ds.getRepository(MessageFeedback));
   });
 
   afterEach(async () => {
@@ -724,6 +728,74 @@ describe('T5 KnowledgeBaseService + RetrievalService 集成测试', () => {
       );
 
       await expect(newKbService.generateSampleQuestions(kbId)).rejects.toThrow(/生成示例问题失败/);
+    });
+  });
+
+  // ========== P9 候选 3：消息反馈 ==========
+
+  describe('FeedbackService', () => {
+    it('点赞：rating=1 创建记录，reason 可空', async () => {
+      const kbId = randomUUID();
+      const messageId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+
+      const fb = await feedbackService.create(userId, messageId, kbId, 1);
+      expect(fb.id).toBeDefined();
+      expect(fb.rating).toBe(1);
+      expect(fb.reason).toBeNull();
+      expect(fb.messageId).toBe(messageId);
+      expect(fb.kbId).toBe(kbId);
+      expect(fb.userId).toBe(userId);
+    });
+
+    it('点踩：rating=-1 必须填 reason', async () => {
+      const kbId = randomUUID();
+      const messageId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+
+      // 空 reason 应抛 BadRequestException
+      await expect(feedbackService.create(userId, messageId, kbId, -1, '')).rejects.toThrow(/理由/);
+      await expect(feedbackService.create(userId, messageId, kbId, -1)).rejects.toThrow(/理由/);
+
+      // 有 reason 正常创建
+      const fb = await feedbackService.create(userId, messageId, kbId, -1, '答非所问');
+      expect(fb.rating).toBe(-1);
+      expect(fb.reason).toBe('答非所问');
+    });
+
+    it('同一 (messageId, userId) 重复评分走 upsert 更新', async () => {
+      const kbId = randomUUID();
+      const messageId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+
+      // 第一次：点赞
+      const fb1 = await feedbackService.create(userId, messageId, kbId, 1);
+      expect(fb1.rating).toBe(1);
+
+      // 第二次：改为点踩（带 reason），应更新而非插入
+      const fb2 = await feedbackService.create(userId, messageId, kbId, -1, '改主意了');
+      expect(fb2.id).toBe(fb1.id); // 同一条记录
+      expect(fb2.rating).toBe(-1);
+      expect(fb2.reason).toBe('改主意了');
+
+      // 验证表里只有一条记录
+      const count = await db.ds.getRepository(MessageFeedback).count({ where: { messageId } });
+      expect(count).toBe(1);
+    });
+
+    it('不同用户对同一 messageId 各自独立记录', async () => {
+      const kbId = randomUUID();
+      const messageId = randomUUID();
+      const user2 = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+
+      await feedbackService.create(userId, messageId, kbId, 1);
+      await feedbackService.create(user2, messageId, kbId, -1, '不相关');
+
+      const all = await db.ds.getRepository(MessageFeedback).find({ where: { messageId } });
+      expect(all).toHaveLength(2);
+      expect(all.find((f) => f.userId === userId)!.rating).toBe(1);
+      expect(all.find((f) => f.userId === user2)!.rating).toBe(-1);
     });
   });
 });

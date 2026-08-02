@@ -32,6 +32,7 @@ import { SystemSetting } from '../src/system/system-setting.entity';
 import { LlmConfig } from '../src/llm/llm-config.entity';
 import { KnowledgeBase } from '../src/knowledge-base/entities/knowledge-base.entity';
 import { KbChunk } from '../src/knowledge-base/entities/kb-chunk.entity';
+import { MessageFeedback } from '../src/knowledge-base/entities/message-feedback.entity';
 
 /**
  * 从 server/.env 加载环境变量（测试不经过 Nest ConfigModule）
@@ -80,6 +81,7 @@ const ENTITIES = [
   LlmConfig,
   KnowledgeBase,
   KbChunk,
+  MessageFeedback,
 ];
 
 /** 测试 schema 句柄 */

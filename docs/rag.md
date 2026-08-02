@@ -756,3 +756,133 @@ LLM_RERANK_CANDIDATE_K=20
 ```
 
 `rag-prompts.yaml`（与 server 同级或 config 目录）—见 R2 章节示例。
+
+## P9 RAG 体验增强
+
+P9 围绕 RAG 交互体验做三项增强，借鉴 WeKnora/MimirQ/Yuxi 三个参考项目的优秀实践，保留 LXDOC 后端工程化优势（拒答双阈值/RRF+rerank/prompt 外置/LLM fallback）。
+
+候选选择原则：价值/成本比 + 与 LXDOC 现有架构兼容性。**未做大改动**（如换 UI 库、加 RAG Trace 调试台、命令面板 ⌘K），这些放 P10+ 长期候选。
+
+### 候选 2：流式打字机平滑
+
+**问题**：原实现直接 `msg.content += evt.content`，遇到后端批量吐 chunk 会出现"卡顿→突然蹦一大段"的体验问题；高速吐字时也会让 markdown 重新渲染抖动。
+
+**方案**：借鉴 Yuxi 的 `useStreamSmoother`，简化为只处理 content + reasoning 两个字段（去掉 tool_call_chunks 等不相关复杂度）。
+
+**核心算法**：
+
+- **EMA 自适应速率**：维护 `avgIntervalMs`（chunk 间隔指数加权平均）+ `avgChunkChars`（chunk 大小 EMA），按后端推送节奏动态调整前端 emit 速率
+- **动态 reserve**：按 `targetLagMs=900ms` 保留一定字符缓冲，让前端比后端慢约 1 秒留余量，避免追平后端后偶尔卡顿
+- **rAF 节流**：每帧按 EMA 速率计算 emit budget，从 buffer 切片 emit；`carryChars` 累积器跨帧保留余数避免丢精度
+- **overflow 保护**：缓冲超 `maxBufferedChars=3000` 时立即排空一部分，防内存膨胀
+
+**关键改动**：
+
+- `web/src/composables/useStreamSmoother.ts`（新建）：单 controller 设计（LXDOC 一次只流式一条消息，无需按 messageId 索引）；接口 `pushContent/pushReasoning/flush/reset/onEmit/isBuffered`
+- `web/test/useStreamSmoother.spec.ts`（新建）：11 个单元测试，raf mock 用队列控制避免同步递归掩盖 reserve 机制
+- `KbAskView.vue`：
+  - `streamSmoother` 实例化 + `onEmit` 回调把增量更新到 `msg.content/msg.reasoning`
+  - `handleEvent` 的 `delta/reasoning` 分支改为 `pushContent/pushReasoning`，不再直接累加
+  - `doSend` finally 中 `flush()` 强制吐完，避免残留字符不显示
+  - `scheduleAutoScroll` 用 rAF 合并滚动，每个 emit 帧不重复触发
+
+**为什么不用 Yuxi 完整版**：Yuxi 的 smoother 含 `tool_call_chunks`、`additional_kwargs.reasoning_content`、`skeleton` 合并、跨 messageId 索引等 458 行复杂度，是为 Agent + 多消息并行流式设计。LXDOC 不用工具调用，一次只流式一条消息，简化后 280 行足够。
+
+### 候选 3：反馈评分 + 置信度徽章
+
+**问题**：原实现没有 RAG 质量反馈闭环，无法采集用户对回答的满意度，后续优化检索质量缺乏数据支撑；用户也不知当前回答的置信度，难以判断是否需要再确认。
+
+**方案**：借鉴 MimirQ 的反馈评分 + Yuxi 的点赞/点踩弹窗 + MimirQ 的置信度徽章，做完整闭环。
+
+**后端**：
+
+- `entities/message-feedback.entity.ts`（新建）：`rag_message_feedback` 表，字段 `messageId/kbId/userId/rating(1或-1)/reason`，唯一索引 `(messageId, userId)` 防重复评分
+- `dto/feedback.dto.ts`（新建）：`CreateFeedbackDto` 用 class-validator 装饰器（`@IsIn([1, -1])` 等）
+- `feedback.service.ts`（新建）：`create()` 实现 upsert 语义——同一 (messageId, userId) 已存在则更新 rating/reason，否则插入
+- `knowledge-base.controller.ts`：加 `POST /knowledge-bases/feedback` 端点
+- `rag.service.ts`：
+  - `RagEvent` 的 `done` 事件加 `messageId: string`（uuid v4）+ `confidence: RagConfidence`
+  - 置信度映射：拒答 → `none`；降级（isFallback）→ `low`；rerank 启用且 `topScore >= 0.5` → `high`；其余正常 → `medium`
+- `knowledge-base.module.ts`：注册 `MessageFeedback` 实体 + `FeedbackService`
+
+**前端**：
+
+- `api/kb.ts`：`RagConfidence` 类型 + `RagEvent done` 加 `messageId/confidence` + `createMessageFeedback(kbId, messageId, rating, reason?)` API
+- `KbAskView.vue`：
+  - `ChatMessage` 加 `messageId/confidence/feedbackRating/feedbackSubmitted` 字段
+  - `handleEvent` done 分支存储新字段
+  - `onSubmitFeedback`：点赞直接提交，点踩先弹 `el-dialog` 写理由（textarea 500 字限制）
+  - `doSubmitFeedback` 调 API 后更新 `msg.feedbackRating/feedbackSubmitted`，按钮变高亮 + 禁用反向
+  - `confidenceMeta` 映射函数：`high/medium/low/none` → 文案 + CSS 类
+  - UI：assistant 消息底部加 `msg-footer` 区块，置信度徽章 + 点赞/点踩按钮（用 inline SVG 而非图标库，避免依赖）
+
+**点踩理由为什么必填**：点赞数据采集意义有限（用户多半不会主动反馈），点踩数据才是优化检索的关键信号——必须给出理由才能形成 expert loop 闭环，否则只是噪声。
+
+**唯一约束设计**：`(messageId, userId)` 唯一 + upsert 语义——允许用户改评（点赞后改点踩），但同一用户对同一回答只保留最后一条记录，避免数据膨胀。
+
+### 候选 1：引用交互三联式
+
+**问题**：原实现 `[1][2]` 渲染为纯上标数字，需要先点开才能看到文档名；hover 无反馈；点击只能滚动到底部引用列表，无法快速预览 chunk 内容。
+
+**方案**：借鉴 WeKnora 的三联式引用交互——pill + 悬浮卡 + 高亮联动。**未做右侧抽屉**（保留消息底部折叠引用列表，渐进增强）。
+
+**关键改动**：
+
+- `utils/rag-refs.ts`：
+  - `buildRefTags(token, msgIdx, refs?)` 加可选 `refs` 参数
+  - 有 refs 时渲染为 pill：`<span class="rag-ref-pill" data-chunk-id data-doc-title data-ref data-msg role="button" tabindex="0">📄 文档名 [1]</span>`
+  - 无 refs 回退原上标 `<sup class="rag-ref-tag">[1]</sup>`（向后兼容旧测试）
+  - HTML 特殊字符转义（防 XSS），长文档名截断到 18 字符
+- `KbAskView.vue`：
+  - `renderAnswer` 传 `msg.refs` 给 `replaceRefPlaceholders`
+  - `onAnswerClick` 用 `closest('.rag-ref-pill, .rag-ref-tag')` 兼容 pill 和上标
+  - **悬浮卡**：`onAnswerMouseEnter/Leave` 监听 mouseover/mouseout（事件冒泡 + closest 查找 pill）
+    - 缓存命中（`chunkCache: Map<chunkId, ChunkDetail>`）直接显示，未命中拉 `getChunk` API
+    - 防竞态：仅当 popover 仍显示当前 chunk 时才更新数据
+    - 延迟 200ms 关闭，让用户能移到 popover 上点"查看全文"
+    - 点击 popover 的"查看全文"复用现有 `chunk-preview` el-dialog
+  - popover UI：Teleport to body + 绝对定位（pill 下方 6px）+ 头部文档名 + body chunk 内容截断 240 字 + "查看全文"链接
+  - pill 样式：胶囊样式，浅蓝背景 + 文档图标 + 文档名 + 序号；hover 反色高亮
+
+**为什么 sanitize 不影响 pill**：`extractRefTokens` 把 `[1]` 替换为 `@@REF_0@@` 占位符 → marked 渲染 → `sanitizeMarkedHtml` 净化 → `replaceRefPlaceholders` 在净化后注入 pill HTML。因 pill 在 sanitize 后注入，绕过 DOMPurify 的 `data-*`/`role` 限制。**但 pill 内容已通过 `escapeHtml` 转义**（文档名、chunk id），防存储型 XSS。
+
+**为什么不做右侧抽屉**：WeKnora 的右侧 420px 抽屉会让对话主区 `padding-right: 420px` 缩窄，LXDOC 当前布局是居中 960px 主区 + 侧栏，加抽屉会改变整体布局结构。底部折叠引用列表已能满足"查看所有引用"需求，悬浮卡 + 高亮联动已覆盖"快速预览 + 定位"两个核心场景。右侧抽屉放 P10+ 长期候选。
+
+### P9 测试统计
+
+- 后端单元：73 个（无新增，rag.service 改 done 事件但走现有测试覆盖）
+- 后端集成：63 个（新增 8：FeedbackService×4 + confidence 断言×3 + rerank high 置信度×1）
+- 前端单元：52 个（新增 20：useStreamSmoother×11 + rag-refs pill×9）
+- 前端 vue-tsc 类型检查通过
+- **合计 188 测试，全量 ~28s**
+
+### P9 数据库迁移
+
+`rag_message_feedback` 表由 TypeORM `synchronize: true` 自动建（开发环境）。生产环境建议手动执行 SQL：
+
+```sql
+CREATE TABLE rag_message_feedback (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  message_id UUID NOT NULL,
+  kb_id UUID NOT NULL,
+  user_id UUID NOT NULL,
+  rating SMALLINT NOT NULL,
+  reason TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX idx_msg_user ON rag_message_feedback (message_id, user_id);
+CREATE INDEX idx_kb ON rag_message_feedback (kb_id);
+CREATE INDEX idx_user ON rag_message_feedback (user_id);
+```
+
+### P9 未做（P10+ 长期候选）
+
+| 候选 | 来源 | 价值 | 何时做 |
+|---|---|---|---|
+| 右侧引用抽屉 | WeKnora | 替代底部折叠列表，"查看原文"直达 | 引用数 >10 时 |
+| RAG Trace 调试台 | MimirQ | pipeline timeline + citation simulation + trace diff | 调优 rerank 权重时 |
+| Chunk 预览工作台 | MimirQ/WeKnora | 分块策略调参可视化 | 切换 chunking 策略时 |
+| 命令面板 ⌘K | WeKnora/Yuxi | 跨 KB 搜索 chunks/messages | KB 数 >20 时 |
+| continue-stream 续流 | WeKnora/Yuxi | 刷新页面恢复会话 | 流式时间长时 |
+| 暗色模式 | 三个都有 | 长时间使用友好 | 用户反馈时 |
+| Markdown 增强（KaTeX/Mermaid/highlight.js） | WeKnora | 公式/流程图/代码块渲染 | 技术文档 RAG 普及后 |
