@@ -13,6 +13,8 @@ import { useAuthStore } from '@/stores/auth';
 import { changePasswordApi } from '@/api/auth';
 import { getKnowledgeTree } from '@/api/knowledge';
 import { listKbs, type KnowledgeBase } from '@/api/kb';
+// 前端版本号（来自 web/package.json，构建时注入）
+import { version as appVersion } from '@/../package.json';
 
 // LXDOC 根组件：三栏布局
 //  - 顶栏：Logo + 全局搜索 + 上传 + 用户菜单
@@ -335,6 +337,7 @@ onMounted(() => {
       <div class="header-left">
         <span class="logo" @click="goHome">LXDOC</span>
         <span class="logo-sub">企业知识库</span>
+        <span class="logo-version">v{{ appVersion }}</span>
       </div>
       <div class="global-search">
         <el-input
@@ -647,6 +650,12 @@ onMounted(() => {
 .logo-sub {
   font-size: var(--lx-font-xs);
   color: var(--lx-header-text-muted);
+  letter-spacing: 0.5px;
+}
+.logo-version {
+  font-size: var(--lx-font-xs);
+  color: var(--lx-header-text-muted);
+  opacity: 0.7;
   letter-spacing: 0.5px;
 }
 .global-search {

@@ -3,6 +3,8 @@ import { reactive, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus';
 import { useAuthStore } from '@/stores/auth';
+// 前端版本号（来自 web/package.json，构建时注入）
+import { version as appVersion } from '@/../package.json';
 
 // 登录页：邮箱 + 密码 + 登录按钮；登录成功后按 redirect query 跳转
 const route = useRoute();
@@ -133,6 +135,7 @@ async function submitRegister() {
         <div class="brand-logo">LX</div>
         <h1 class="brand-name">LXDOC</h1>
         <p class="brand-sub">企业知识库</p>
+        <p class="brand-version">v{{ appVersion }}</p>
       </div>
       <el-form
         ref="loginFormRef"
@@ -300,6 +303,13 @@ async function submitRegister() {
   font-size: var(--lx-font-sm);
   color: var(--lx-text-secondary);
   letter-spacing: 1px;
+}
+.brand-version {
+  margin: var(--lx-space-1) 0 0;
+  font-size: var(--lx-font-xs);
+  color: var(--lx-text-secondary);
+  opacity: 0.7;
+  letter-spacing: 0.5px;
 }
 
 .login-extra {
