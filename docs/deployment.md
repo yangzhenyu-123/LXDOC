@@ -200,7 +200,9 @@ RAG 知识库问答依赖两个向量模型服务（[HuggingFace TEI](https://gi
 
 > 前置条件：`.env` 中 `LLM_ENABLED=true` + `LLM_BASE_URL` 指向内网 GLM 端点（RAG 答案生成由 LLM 完成，向量服务只负责检索）。
 
-### 方式 1：docker-compose.rag.yml overlay（推荐，统一编排）
+### 推荐方式：docker-compose.rag.yml overlay（统一编排）
+
+> **统一管理原则**：所有 docker 服务（包括 TEI 向量服务）一律由 docker-compose 编排管理，不再用 `docker run` 启动独立容器，便于版本/网络/卷/重启策略统一管控。
 
 `docker-compose.rag.yml` 定义 `tei-embed` + `tei-rerank` 两个 sidecar，与主编排叠加启动，backend 通过 compose 内网服务名访问（`http://tei-embed:80`），无需对外暴露端口。
 
@@ -234,9 +236,33 @@ docker logs -f lxdoc-tei-embed    # 等待 "Ready" 日志
 docker logs -f lxdoc-tei-rerank
 ```
 
-### 方式 2：外部已部署的 TEI 服务
+### 从独立 docker 容器迁移到 overlay
 
-若服务器已有独立 TEI 容器（或共享其他机器的 TEI 服务），在 `.env` 直接填端点地址，无需叠加 overlay：
+若服务器之前用 `docker run` 起过独立 TEI 容器（如 `tei-embed`、`tei-rerank`），切换到 overlay 编排前需先清理旧容器，避免端口/卷名冲突：
+
+```bash
+# 1. 停止并删除旧独立容器
+docker stop tei-embed tei-rerank 2>/dev/null
+docker rm tei-embed tei-rerank 2>/dev/null
+
+# 2. （可选）复用旧模型缓存：把旧 volume 内容迁到 overlay 的命名 volume
+# 旧 docker run -v tei-embed-models:/data ... 的卷名若与 overlay 一致（tei-embed-models），
+# docker-compose up 时会自动复用，无需迁移；卷名不同则需手动迁移：
+# docker run --rm -v 旧卷名:/from -v tei-embed-models:/to alpine sh -c "cp -a /from/. /to/"
+
+# 3. 启动 overlay
+docker-compose -f docker-compose.yml -f docker-compose.rag.yml up -d tei-embed tei-rerank
+
+# 4. 确认旧容器已删除，compose 接管
+docker ps --filter "name=tei-"
+# 应只见 lxdoc-tei-embed / lxdoc-tei-rerank（container_name 前缀 lxdoc-），无裸 tei-embed/tei-rerank
+```
+
+> 旧 `docker run` 容器与 overlay 容器**不能并存**：overlay 的 `tei-embed` 监听 80 端口（仅内网），旧容器若映射 8081:80 会占用宿主机端口，且 backend 会优先走 overlay 内网服务名，旧容器无人调用却占资源。
+
+### 备选方式：外部已部署的 TEI 服务
+
+若组织内已有共享的 TEI 服务（其他团队维护，或部署在其他机器），无需叠加 overlay，在 `.env` 直接填端点地址：
 
 ```bash
 cat >> .env <<'EOF'
@@ -252,22 +278,8 @@ EOF
 ```
 
 > 注意：backend 容器访问宿主机上的 TEI 需确保网络可达。docker 默认 bridge 网络下容器可访问宿主机 IP；如遇连接问题，在 `docker-compose.yml` 的 backend 段加 `extra_hosts: ["host.docker.internal:host-gateway"]` 后用 `http://host.docker.internal:8081`。
-
-### 独立部署 TEI 容器（不用 overlay 时参考）
-
-```bash
-# embedding 服务（必需）
-docker run -d --name tei-embed -p 8081:80 \
-  -v tei-embed-models:/data \
-  ghcr.io/huggingface/text-embeddings-inference:cpu-1.5 \
-  --model-id BAAI/bge-m3 --max-batch-tokens 8192
-
-# rerank 服务（可选）
-docker run -d --name tei-rerank -p 8082:80 \
-  -v tei-rerank-models:/data \
-  ghcr.io/huggingface/text-embeddings-inference:cpu-1.5 \
-  --model-id BAAI/bge-reranker-v2-m3
-```
+>
+> 此方式适用于 TEI 服务由其他系统统一维护的场景；若 TEI 仅本系统使用，**强烈推荐用 overlay 统一编排**，避免散落 `docker run` 容器难以维护。
 
 ### 数据库表（自动建表）
 
@@ -281,8 +293,9 @@ RAG 知识库使用 pgvector 扩展，`docker-compose.yml` 的 postgres 已用 `
 ### 验证 RAG 功能
 
 ```bash
-# 1. TEI embedding 就绪检查
-curl http://localhost:8081/health    # 方式2；overlay 方式用 docker exec lxdoc-tei-embed wget -qO- localhost/health
+# 1. TEI embedding 就绪检查（overlay 方式）
+docker exec lxdoc-tei-embed wget -qO- localhost/health
+# 备选方式（外部 TEI）：curl http://<PROD_HOST>:8081/health
 
 # 2. 后端 RAG 配置自检
 curl http://localhost:8080/api/knowledge-base/rag/config -H "Authorization: Bearer <token>"

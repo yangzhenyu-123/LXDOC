@@ -40,6 +40,7 @@ docker compose -f docker-compose.quickstart.yml up -d
 - **文档收藏**：星标文档，提供「我的收藏」快捷入口
 - **kkFileView 统一预览**：100+ 格式开箱即用（office/Visio/CAD/3D 模型/音视频/邮件/电子书/医疗影像/财务等），前端 iframe 嵌入
 - **LLM 接入骨架**：Provider 抽象 + GLM5.2 OpenAI 兼容实现；用户级 LLM 配置（baseUrl/apiKey/model/enableThinking），admin 可设代理身份；admin 未配个人配置时回退系统配置；「AI 总结」工作流生成 Docsify 风格 Markdown 文档
+- **RAG 知识库问答**：基于 pgvector + bge-m3 + TEI 的检索增强生成；多轮对话记忆、文档选择器限定检索范围、引用三联式（pill + 悬浮卡 + 查看全文）、流式打字机平滑（EMA + rAF）、置信度徽章、反馈评分闭环；可选 bge-reranker-v2-m3 二阶段精排；RRF 混合检索 + 拒答双阈值；prompt 模板外置 YAML + LLM 多 Provider Fallback。详见 [docs/rag.md](./docs/rag.md)
 - **系统配置在线编辑**：14 项可改配置（LLM 开关/端点/模型/超时、各服务开关、OCR、注册、上传大小），admin 在线修改立即生效无需重启
 - **静态文件鉴权**：原文件 / 图片 / 附件不再裸暴露，统一走 `/api/files/:docId/*?token=` 短期签名 URL，防路径穿越。
 - **认证授权**：JWT 双 token（access 15min + refresh 7d）+ RBAC（admin/editor/viewer）+ 资源级 ACL + 审计日志。
@@ -106,6 +107,7 @@ LXDOC/
 | [docs/deployment.md](./docs/deployment.md) | 部署、环境变量、8 服务编排、备份恢复 |
 | [docs/parsing.md](./docs/parsing.md) | 文档解析与图片存储（docling 主 + 本地回退 + csv/tsv 直读） |
 | [docs/llm.md](./docs/llm.md) | LLM Provider 抽象、GLM5.2 接入、用户级配置架构、AI 总结 |
+| [docs/rag.md](./docs/rag.md) | RAG 知识库问答（pgvector + bge-m3 + TEI）：架构、P0-P9 分阶段实施、API、运维 |
 | [docs/api-reference.md](./docs/api-reference.md) | 后端接口清单（含附件/收藏/系统配置/LLM 配置） |
 
 ## 一键启动（克隆仓库后）
@@ -172,6 +174,15 @@ docker compose up -d
 | postgres | 5432 | ❌ | PostgreSQL 16 数据库（仅内网） |
 
 > 仅 `8080` 对外暴露，其余服务均在内部网络，最小攻击面。
+>
+> 启用 RAG 知识库问答时叠加 `docker-compose.rag.yml` overlay，额外拉起 2 个 TEI 服务（仅内网，不对外暴露）：
+>
+> | 服务 | 端口 | 说明 |
+> |---|---|---|
+> | tei-embed | 80（内部） | TEI bge-m3 embedding 服务（1024 维，RAG 必需） |
+> | tei-rerank | 80（内部） | TEI bge-reranker-v2-m3 rerank 服务（可选，未配置时回退纯 RRF） |
+>
+> 详见 [docs/deployment.md RAG 章节](./docs/deployment.md#rag-知识库问答tei-向量服务)。
 
 ## 本地开发
 
@@ -195,6 +206,23 @@ pnpm dev
 ```
 
 前端开发服务器（默认 5173）已配置代理：`/api` → 后端 3000，`/onlyoffice` → 本地 8082（dev compose 映射 8082:80）。
+
+## 参考项目
+
+LXDOC 的 RAG 知识库模块在设计与实现过程中调研并参考了以下开源项目（按项目定位分组）：
+
+| 项目 | 仓库 | 定位 | 借鉴点 |
+|---|---|---|---|
+| ragflow | [infiniflow/ragflow](https://github.com/infiniflow/ragflow) | RAG 引擎 | chunk 切分策略、混合检索流程、引用标注、错误处理 |
+| langgraph | [langchain-ai/langgraph](https://github.com/langchain-ai/langgraph) | LangChain 状态图编排 | 多轮对话状态管理 |
+| MimirQ | [skygazer42/MimirQ](https://github.com/skygazer42/MimirQ) | 中文优先的企业 RAG 知识库 | 上下文组装、引用标注、反馈评分、置信度徽章 |
+| WeKnora | [Tencent/WeKnora](https://github.com/Tencent/WeKnora) | 腾讯微信团队知识库 | 拒答策略、引用三联式（pill + 悬浮卡 + 查看全文） |
+| Yuxi | [xerrors/Yuxi](https://github.com/xerrors/Yuxi) | 多租户企业知识库 | 流式打字机平滑（EMA + rAF）、点赞/点踩弹窗 |
+| PandaWiki | [chaitin/PandaWiki](https://github.com/chaitin/PandaWiki) | AI 知识库搭建系统 | 文档选择器 UI、示例问题 chips |
+| CowAgent | [zhayujie/CowAgent](https://github.com/zhayujie/CowAgent) | 开源 AI 助手 Agent Harness | 错误处理 retry 分级、AbortController |
+| zgi | [zgiai/zgi](https://gitee.com/zgiai/zgi)（Gitee） | Agent Runtime 工作空间 | 知识库实体设计参考 |
+
+> 这些项目源码在工作目录下用于调研（`.gitignore` 已忽略，不入库）。各模块设计借鉴的具体来源详见 [docs/rag.md](./docs/rag.md) 对应章节的「设计来源」小节。
 
 ## 许可证
 
