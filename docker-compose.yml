@@ -12,7 +12,7 @@
 services:
   # PostgreSQL 数据库
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16  # 含 vector 0.8.2 + pg_trgm，知识库 RAG 向量检索
     container_name: lxdoc-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-lxdoc}
@@ -216,7 +216,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 120s
-    restart: unless-stopped
+    restart: "on-failure:5"
     mem_limit: 4g
     cpus: 2
     # docker 18.09 单网络兼容：统一接入 default，不对外暴露（expose 而非 ports）

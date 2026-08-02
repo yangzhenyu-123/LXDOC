@@ -1,0 +1,43 @@
+import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { KnowledgeBase } from './entities/knowledge-base.entity';
+import { KbChunk } from './entities/kb-chunk.entity';
+import { Document } from '../documents/document.entity';
+import { KnowledgeBaseController } from './knowledge-base.controller';
+import { KnowledgeBaseService } from './knowledge-base.service';
+import { ChunkingService } from './chunking.service';
+import { EmbeddingService } from './embedding.service';
+import { RetrievalService } from './retrieval.service';
+import { RagService } from './rag.service';
+import { LlmModule } from '../llm/llm.module';
+
+/**
+ * 知识库模块（RAG 向量检索 + 问答）
+ *
+ * P0-P1: 实体 + 索引就绪
+ * P2: 知识库 CRUD + 文档加入/移出（chunking + embedding + 入库）
+ * P3: 混合检索 + RRF
+ * P4: RAG 问答（检索 → prompt → GLM 流式 → 引用）
+ */
+@Module({
+  imports: [
+    TypeOrmModule.forFeature([KnowledgeBase, KbChunk, Document]),
+    LlmModule,
+  ],
+  controllers: [KnowledgeBaseController],
+  providers: [
+    KnowledgeBaseService,
+    ChunkingService,
+    EmbeddingService,
+    RetrievalService,
+    RagService,
+  ],
+  exports: [
+    KnowledgeBaseService,
+    ChunkingService,
+    EmbeddingService,
+    RetrievalService,
+    RagService,
+  ],
+})
+export class KnowledgeBaseModule {}

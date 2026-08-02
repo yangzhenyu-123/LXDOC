@@ -22,6 +22,7 @@ import { AuditModule } from './audit/audit.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { LlmModule } from './llm/llm.module';
 import { SystemModule } from './system/system.module';
+import { KnowledgeBaseModule } from './knowledge-base/knowledge-base.module';
 import { AuditInterceptor } from './audit/audit.interceptor';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
@@ -69,6 +70,8 @@ import { RolesGuard } from './common/guards/roles.guard';
     LlmModule,
     // 系统配置模块（GET /api/system/config，仅 admin，返回各服务运行时配置）
     SystemModule,
+    // 知识库模块（pgvector 向量检索 + RAG 问答）
+    KnowledgeBaseModule,
   ],
   providers: [
     // 全局守卫：ThrottlerGuard 限流（最前，防暴力请求穿透认证），
@@ -98,12 +101,22 @@ export class AppModule implements OnApplicationBootstrap {
    * 每条 SQL 独立 try/catch，已存在则跳过，连接失败时不影响服务启动
    */
   async onApplicationBootstrap() {
+     try {
+       await this.entityManager.query('CREATE EXTENSION IF NOT EXISTS pg_trgm;');
+       this.logger.log('pg_trgm 扩展已就绪');
+     } catch (err) {
+       this.logger.error(
+         `创建 pg_trgm 扩展失败：${(err as Error).message}`,
+       );
+     }
+
+    // pgvector 扩展（知识库 RAG 向量检索）
     try {
-      await this.entityManager.query('CREATE EXTENSION IF NOT EXISTS pg_trgm;');
-      this.logger.log('pg_trgm 扩展已就绪');
+      await this.entityManager.query('CREATE EXTENSION IF NOT EXISTS vector;');
+      this.logger.log('vector 扩展已就绪');
     } catch (err) {
       this.logger.error(
-        `创建 pg_trgm 扩展失败：${(err as Error).message}`,
+        `创建 vector 扩展失败：${(err as Error).message}`,
       );
     }
 
@@ -187,10 +200,42 @@ export class AppModule implements OnApplicationBootstrap {
           `已迁移 ${rewrote.rowCount} 篇文档的图片链接到鉴权接口`,
         );
       }
+     } catch (err) {
+       this.logger.error(
+         `迁移图片链接失败：${(err as Error).message}`,
+       );
+     }
+
+    // 知识库 kb_chunks 表：添加 embedding vector(1024) 列 + HNSW/GIN 索引
+    // TypeORM synchronize 只建实体中定义的列，embedding 列需 raw SQL 创建
+    // 注意：KbChunk 实体已设 synchronize=false，TypeORM 不会动此表 schema，
+    //       此处 raw SQL 负责创建 embedding 列 + 索引。
+    try {
+      // embedding 列（vector(1024)），bge-m3 维度
+      await this.entityManager.query(
+        `ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS embedding vector(1024);`,
+      );
+      // HNSW 索引（余弦距离，知识库语义检索主索引）
+      await this.entityManager.query(
+        `CREATE INDEX IF NOT EXISTS idx_kb_chunks_embedding_hnsw
+         ON kb_chunks USING hnsw (embedding vector_cosine_ops)
+         WITH (m = 16, ef_construction = 64);`,
+      );
+      // GIN trigram 索引（词法检索路，混合检索用）
+      await this.entityManager.query(
+        `CREATE INDEX IF NOT EXISTS idx_kb_chunks_content_trgm
+         ON kb_chunks USING GIN (content gin_trgm_ops);`,
+      );
+      // 复合索引（按知识库 + 文档过滤 chunk）
+      await this.entityManager.query(
+        `CREATE INDEX IF NOT EXISTS idx_kb_chunks_kb_doc
+         ON kb_chunks (kb_id, document_id);`,
+      );
+      this.logger.log('kb_chunks 向量索引已就绪（HNSW + GIN trgm）');
     } catch (err) {
       this.logger.error(
-        `迁移图片链接失败：${(err as Error).message}`,
+        `创建 kb_chunks 向量索引失败：${(err as Error).message}`,
       );
     }
-  }
+   }
 }

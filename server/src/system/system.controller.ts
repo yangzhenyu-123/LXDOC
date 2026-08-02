@@ -72,6 +72,7 @@ export class SystemController {
         enabled: llmConfig.enabled,
         baseUrl: llmConfig.baseUrl,
         model: llmConfig.model,
+        embedBaseUrl: llmConfig.embedBaseUrl,
         embedModel: llmConfig.embedModel || '',
         embedDimensions: llmConfig.embedDimensions || 0,
         timeout: llmConfig.timeout,

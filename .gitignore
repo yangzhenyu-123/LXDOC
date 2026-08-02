@@ -30,6 +30,8 @@ web/public/vditor/
 # IDE
 .idea/
 .vscode/
+*.swp
+*.swo
 
 # Trae AI 助手本地工作目录（specs/tasks 等过程产物，不入库）
 .trae/
@@ -40,5 +42,20 @@ selftest/
 # 备份产物（backup 容器定时生成，不入库）
 backups/
 
+# 配置文件临时备份（开发时手动 cp 生成，不入库）
+*.bak.*
+*.bak
+
 # opencode/agent 系统临时目录
 .clawhub/
+
+# RAG 调研参考项目源码（开发时 clone 用于调研，不入库）
+CowAgent/
+MimirQ/
+PandaWiki/
+WeKnora/
+Yuxi/
+langgraph/
+ragflow/
+zgi/
+

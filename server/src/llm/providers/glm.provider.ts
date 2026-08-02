@@ -6,6 +6,8 @@ import {
   LlmMessage,
   LlmNotSupportedException,
   LlmProvider,
+  LlmStreamChunk,
+  LlmStreamProvider,
 } from '../llm-provider.interface';
 import { llmConfig } from '../../config/llm.config';
 
@@ -13,18 +15,24 @@ import { llmConfig } from '../../config/llm.config';
  * GLM Provider（内网 GLM5.2，OpenAI 兼容接口）
  *
  * 假设内网 GLM 提供：
- * - POST {baseUrl}/chat/completions  (OpenAI 兼容)
+ * - POST {baseUrl}/chat/completions  (OpenAI 兼容，支持 stream=true)
  * - POST {baseUrl}/embeddings        (可选，若无则 embed 抛 NotSupportedException)
  *
  * 认证：Authorization: Bearer <apiKey>（apiKey 为空时跳过头）
  * 超时：LlmChatOptions.timeout 优先，否则用 llmConfig.timeout
  * 重试：网络错误/5xx 最多重试 llmConfig.maxRetries 次，指数退避 500ms/1s/...
  *
+ * 流式（streamChat）：
+ * - 请求 stream=true，响应为 SSE 行 "data: {json}\n\n"
+ * - 解析 delta.reasoning_content（GLM-5.2 思考链）和 delta.content（正文）
+ * - 识别 "[DONE]" 终止标记
+ * - 支持 AbortSignal 中断
+ *
  * 本期仅实现骨架，未配置（LLM_ENABLED=false）时 isReady() 返回 false，
  * LlmService 会跳过该 Provider，业务降级返回 null。
  */
 @Injectable()
-export class GlmProvider implements LlmProvider {
+export class GlmProvider implements LlmProvider, LlmStreamProvider {
   private readonly logger = new Logger(GlmProvider.name);
   readonly name = 'glm';
 
@@ -70,9 +78,150 @@ export class GlmProvider implements LlmProvider {
     };
   }
 
-  async embed(text: string, model?: string): Promise<LlmEmbedResult> {
-    if (!this.isReady()) {
+  /**
+   * 流式对话：异步生成器逐块产出
+   *
+   * 请求 GLM /chat/completions with stream=true，解析 SSE 行：
+   * - delta.reasoning_content → yield { type: 'reasoning', content }
+   * - delta.content           → yield { type: 'delta', content }
+   * - "[DONE]"                → yield { type: 'done' } 并结束
+   *
+   * 支持中断：opts.signal 触发 abort 后，fetch 抛 AbortError，生成器终止。
+   * 错误处理：4xx 直接抛错；5xx/网络错误不重试（流式重试会重复输出，由调用方处理）。
+   */
+  async *streamChat(
+    messages: LlmMessage[],
+    opts?: LlmChatOptions & { signal?: AbortSignal },
+  ): AsyncGenerator<LlmStreamChunk, void, unknown> {
+    const baseUrl = opts?.baseUrl ?? llmConfig.baseUrl;
+    const apiKey = opts?.apiKey ?? llmConfig.apiKey;
+    if (!opts?.baseUrl && !this.isReady()) {
       throw new LlmNotSupportedException('GLM 未启用或未配置 baseUrl');
+    }
+    if (!baseUrl) {
+      throw new LlmNotSupportedException('GLM 未配置 baseUrl');
+    }
+    const model = opts?.model ?? llmConfig.model;
+    const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+    const body: Record<string, unknown> = {
+      model,
+      messages,
+      temperature: opts?.temperature ?? 0.7,
+      stream: true,
+      ...(opts?.maxTokens ? { max_tokens: opts.maxTokens } : {}),
+    };
+    if (opts?.enableThinking === false) {
+      body.chat_template_kwargs = { enable_thinking: false };
+    }
+
+    const timeout = opts?.timeout ?? llmConfig.timeout;
+    // 合并用户 signal 和超时 signal
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    const onExternalAbort = () => controller.abort();
+    if (opts?.signal) {
+      if (opts.signal.aborted) {
+        clearTimeout(timer);
+        // 契约：已 aborted 时仍产出 done，让调用方正常结束消费
+        yield { type: 'done' };
+        return;
+      }
+      opts.signal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        const err: Error & { status?: number } = new Error(
+          `GLM HTTP ${resp.status}: ${text.slice(0, 200)}`,
+        );
+        err.status = resp.status;
+        throw err;
+      }
+      if (!resp.body) {
+        throw new Error('GLM stream 响应无 body');
+      }
+
+      // 逐行解析 SSE：行格式 "data: {json}\n\n"，终止标记 "data: [DONE]"
+      reader = resp.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let done = false;
+      while (!done) {
+        const { value, done: readerDone } = await reader.read();
+        if (readerDone) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE 事件以空行分隔，按行切分
+        const lines = buffer.split('\n');
+        // 最后一行可能不完整，留在 buffer
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith(':')) continue; // 空行或注释行（心跳）
+          if (!trimmed.startsWith('data:')) continue;
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') {
+            done = true;
+            break;
+          }
+          try {
+            const chunk: any = JSON.parse(data);
+            const delta = chunk?.choices?.[0]?.delta;
+            if (!delta) continue;
+            // 思考链增量（GLM-5.2 reasoning_content）
+            if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+              yield { type: 'reasoning', content: delta.reasoning_content };
+            }
+            // 正文增量
+            if (typeof delta.content === 'string' && delta.content) {
+              yield { type: 'delta', content: delta.content };
+            }
+          } catch {
+            // 单行 JSON 解析失败不阻塞流，跳过
+            this.logger.warn(`GLM stream 行解析失败：${data.slice(0, 100)}`);
+          }
+        }
+      }
+      yield { type: 'done' };
+    } catch (err) {
+      // 用户中断（AbortError）静默结束，不报错
+      if ((err as Error).name === 'AbortError') {
+        return;
+      }
+      this.logger.warn(`GLM streamChat 失败：${(err as Error).message}`);
+      yield { type: 'error', message: '生成失败，请稍后重试' };
+    } finally {
+      clearTimeout(timer);
+      // 显式释放 reader，避免连接残留
+      if (reader) {
+        try {
+          await reader.cancel();
+        } catch {
+          // cancel 抛错忽略（连接已断/已读完）
+        }
+      }
+      if (opts?.signal) {
+        opts.signal.removeEventListener('abort', onExternalAbort);
+      }
+    }
+  }
+
+  async embed(text: string, model?: string): Promise<LlmEmbedResult> {
+    // embedding 端点：优先用 embedBaseUrl（独立 TEI 服务），回退到 baseUrl（GLM 自带 embedding）
+    const embedBaseUrl = llmConfig.embedBaseUrl;
+    const baseUrl = embedBaseUrl || llmConfig.baseUrl;
+    if (!baseUrl) {
+      throw new LlmNotSupportedException('未配置 embedBaseUrl 或 baseUrl，向量检索不可用');
     }
     const useModel = model ?? llmConfig.embedModel;
     if (!useModel) {
@@ -80,9 +229,11 @@ export class GlmProvider implements LlmProvider {
         '未配置 LLM_EMBED_MODEL，向量检索不可用',
       );
     }
-    const url = `${llmConfig.baseUrl.replace(/\/$/, '')}/embeddings`;
+    const url = `${baseUrl.replace(/\/$/, '')}/embeddings`;
     const body = { model: useModel, input: text };
-    const data = await this.requestWithRetry(url, body, undefined, llmConfig.apiKey);
+    // 独立 TEI 服务不需要 apiKey；回退到 GLM baseUrl 时用 llmConfig.apiKey
+    const apiKey = embedBaseUrl ? undefined : llmConfig.apiKey;
+    const data = await this.requestWithRetry(url, body, undefined, apiKey);
     const vector: number[] = data?.data?.[0]?.embedding ?? [];
     return {
       vector,

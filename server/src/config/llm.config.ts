@@ -4,7 +4,9 @@
  * - baseUrl：内网 GLM5.2 OpenAI 兼容端点（如 http://internal-glm/v1）
  * - apiKey：调用密钥（内网若无需鉴权可留空）
  * - model：默认对话模型（glm-5.2）
- * - embedModel：向量模型（若内网提供；未提供则禁用 RAG 向量检索）
+ * - embedBaseUrl：向量模型推理服务端点（如 TEI http://<PROD_HOST>:8081）
+ * - embedModel：向量模型标识（如 BAAI/bge-m3）
+ * - embedDimensions：向量维度（bge-m3 = 1024）
  * - timeout：单次请求超时（毫秒）
  *
  * 设计：所有值走 env，未配置时 enabled=false，业务模块走 @OptionalLlm() 注入并降级返回 null。
@@ -37,11 +39,14 @@ export const llmConfig = {
   get model(): string {
     return getOverrideString('llm.model', process.env.LLM_MODEL ?? 'glm-5.2');
   },
+  get embedBaseUrl(): string {
+    return getOverrideString('llm.embedBaseUrl', process.env.LLM_EMBED_BASE_URL ?? '');
+  },
   get embedModel(): string {
-    return process.env.LLM_EMBED_MODEL ?? '';
+    return getOverrideString('llm.embedModel', process.env.LLM_EMBED_MODEL ?? '');
   },
   get embedDimensions(): number {
-    return Number(process.env.LLM_EMBED_DIMENSIONS ?? '0') || 0;
+    return getOverrideNumber('llm.embedDimensions', Number(process.env.LLM_EMBED_DIMENSIONS ?? '0') || 0);
   },
   get timeout(): number {
     return getOverrideNumber('llm.timeout', Number(process.env.LLM_TIMEOUT ?? '30000') || 30000);

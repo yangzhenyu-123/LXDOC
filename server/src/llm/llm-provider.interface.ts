@@ -56,6 +56,21 @@ export interface LlmChatOptions {
 }
 
 /**
+ * 流式 chunk 类型
+ * - reasoning：推理模型的思考链增量（GLM-5.2 的 reasoning_content）
+ * - delta：正文增量（OpenAI delta.content）
+ * - error：流式过程中发生错误（降级也失败时下发，调用方据此向用户报错）
+ * - done：流结束
+ *
+ * 注：error 后流终止，不再产出 done；调用方收到 error 即应结束消费。
+ */
+export type LlmStreamChunk =
+  | { type: 'reasoning'; content: string }
+  | { type: 'delta'; content: string }
+  | { type: 'error'; message: string }
+  | { type: 'done' };
+
+/**
  * 对话响应
  */
 export interface LlmChatResult {
@@ -104,6 +119,31 @@ export interface LlmProvider {
    * LlmService 据此禁用向量检索相关功能
    */
   embed(text: string, model?: string): Promise<LlmEmbedResult>;
+}
+
+/**
+ * 流式对话能力（可选）
+ * 支持 OpenAI 兼容 stream API 的 Provider 实现此接口，
+ * LlmService.streamChat 优先调用，不支持时回退到 chat（非流式）。
+ */
+export interface LlmStreamProvider extends LlmProvider {
+  /**
+   * 流式对话：异步生成器逐块产出
+   * - chunk.type='reasoning'：推理模型的思考链增量（GLM-5.2 的 reasoning_content）
+   * - chunk.type='delta'：正文增量
+   * - chunk.type='error'：流式过程发生错误（降级也失败时下发）
+   * - chunk.type='done'：流正常结束（最后必产出一个；error 后不再产出 done）
+   *
+   * 实现要点：
+   * 1. 请求 /chat/completions with stream: true
+   * 2. 解析 SSE 行 "data: {json}"，识别 "[DONE]" 终止
+   * 3. 分离 delta.reasoning_content 和 delta.content
+   * 4. 支持 AbortSignal（opts.signal）中断
+   */
+  streamChat(
+    messages: LlmMessage[],
+    opts?: LlmChatOptions & { signal?: AbortSignal },
+  ): AsyncGenerator<LlmStreamChunk, void, unknown>;
 }
 
 /**
