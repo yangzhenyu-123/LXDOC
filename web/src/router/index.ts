@@ -114,13 +114,17 @@ declare module 'vue-router' {
  * - 未登录跳 /login?redirect=...
  * - 已登录访问 /login 跳首页
  * - 已登录但角色不匹配跳首页
+ *
+ * H8 修复：token 改 httpOnly cookie，前端无法读取；以 localStorage 中的 user 信息
+ * 作为登录态判据。user 存在但 cookie 过期时，首个 API 请求 401 → client 拦截器
+ * 自动 refresh → 失败则 forceLogout 清空 user 并跳登录。
  */
 router.beforeEach((to, _from, next) => {
   // 公共路由直接放行
   if (to.meta.public) {
-    const access = localStorage.getItem('lxdoc_access_token');
+    const hasUser = !!localStorage.getItem('lxdoc_user');
     // 已登录访问登录页 → 跳首页
-    if (to.path === '/login' && access) {
+    if (to.path === '/login' && hasUser) {
       next('/');
       return;
     }
@@ -128,9 +132,9 @@ router.beforeEach((to, _from, next) => {
     return;
   }
 
-  // 检查登录态
-  const access = localStorage.getItem('lxdoc_access_token');
-  if (!access) {
+  // 检查登录态（基于 user 信息判据）
+  const hasUser = !!localStorage.getItem('lxdoc_user');
+  if (!hasUser) {
     next('/login?redirect=' + encodeURIComponent(to.fullPath));
     return;
   }

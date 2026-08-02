@@ -49,31 +49,39 @@ export class KbIngestionController {
       documentId: dto.documentId,
       requesterId: user.id,
       note: dto.note,
+      user,
     });
   }
 
   @ApiOperation({ summary: '列出入库申请（按 status/kbId/requesterId 筛选）' })
   @Get('requests')
-  findAll(@Query() query: {
-    status?: IngestionRequestStatus;
-    kbId?: string;
-    requesterId?: string;
-    page?: string;
-    pageSize?: string;
-  }) {
+  findAll(
+    @Query() query: {
+      status?: IngestionRequestStatus;
+      kbId?: string;
+      requesterId?: string;
+      page?: string;
+      pageSize?: string;
+    },
+    @CurrentUser() user: AuthUser,
+  ) {
     return this.ingestionService.findAll({
       status: query.status,
       kbId: query.kbId,
       requesterId: query.requesterId,
       page: query.page ? Number(query.page) : undefined,
       pageSize: query.pageSize ? Number(query.pageSize) : undefined,
+      user,
     });
   }
 
   @ApiOperation({ summary: '查看入库申请详情（含审核意见列表）' })
   @Get('requests/:id')
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.ingestionService.findOne(id);
+  findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.ingestionService.findOne(id, user);
   }
 
   @ApiOperation({ summary: '审核通过（first-write-wins，首个通过触发入库）' })

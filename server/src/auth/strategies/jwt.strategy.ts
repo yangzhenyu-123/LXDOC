@@ -1,11 +1,15 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
-import { authConfig } from '../../config/auth.config';
+import {
+  authConfig,
+  ACCESS_TOKEN_COOKIE,
+} from '../../config/auth.config';
 
 /**
  * JWT 策略
- * - 从 Authorization: Bearer <token> 提取 access token
+ * - 优先从 httpOnly cookie 提取 access token（H8：前端无 JS 可读，防 XSS 窃取）
+ * - 回退到 Authorization: Bearer <token>（兼容 Swagger / 外部 API 客户端）
  * - 校验签名与过期时间
  * - 拒绝 refresh token 访问业务 API
  * validate 返回值会被挂到 req.user 上，供 @CurrentUser / 守卫使用
@@ -14,7 +18,10 @@ import { authConfig } from '../../config/auth.config';
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   constructor() {
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        (req: any) => req?.cookies?.[ACCESS_TOKEN_COOKIE] ?? null,
+        ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ]),
       ignoreExpiration: false,
       secretOrKey: authConfig.jwtSecret,
     });

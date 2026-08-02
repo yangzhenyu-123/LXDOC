@@ -71,7 +71,7 @@ export class UsersService {
       this.logger.log(`已创建管理员 ${email}（来自 ADMIN_PASSWORD 环境变量）`);
     } else {
       this.logger.warn(
-        `已创建默认管理员 ${email} / ${password}，请立即修改密码（生产环境请用 ADMIN_PASSWORD 注入）`,
+        `已创建默认管理员 ${email}，请立即修改密码（开发环境默认密码见 ADMIN_PASSWORD 或文档）`,
       );
     }
   }

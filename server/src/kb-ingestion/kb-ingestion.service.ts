@@ -26,6 +26,8 @@ import { NotificationService } from '../notifications/notification.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit-log.entity';
+import { AccessControlService } from '../organizations/access-control.service';
+import { AuthUser } from '../common/decorators/current-user.decorator';
 
 /**
  * 知识库入库审核服务
@@ -67,6 +69,7 @@ export class KbIngestionService {
     private readonly kbService: KnowledgeBaseService,
     private readonly notificationService: NotificationService,
     private readonly auditService: AuditService,
+    private readonly accessControl: AccessControlService,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -88,12 +91,16 @@ export class KbIngestionService {
     documentId: string;
     requesterId: string;
     note?: string;
+    user: AuthUser;
   }): Promise<{ ingested: boolean; requestId?: string; chunkCount?: number }> {
     const kb = await this.kbRepo.findOne({ where: { id: input.kbId } });
     if (!kb) throw new NotFoundException(`知识库 ${input.kbId} 不存在`);
 
     const doc = await this.docRepo.findOne({ where: { id: input.documentId } });
     if (!doc) throw new NotFoundException(`文档 ${input.documentId} 不存在`);
+
+    // S2 修复：校验申请人对文档的读权限，防止越权入库后经 RAG 复述内容
+    this.accessControl.assertCanRead(input.user, doc);
 
     // KB 未开启审核 → 直接入库
     if (!kb.requireReview) {
@@ -418,12 +425,17 @@ export class KbIngestionService {
 
   /**
    * 申请详情（含审核意见列表）
+   * H2 修复：非 admin 仅能查看自己创建的申请
    */
-  async findOne(id: string): Promise<{
+  async findOne(id: string, user: AuthUser): Promise<{
     request: KbIngestionRequest;
     reviews: KbIngestionReview[];
   }> {
     const request = await this.getRequestOrThrow(id);
+    // 非 admin 仅能查看自己的申请
+    if (user.role !== UserRole.ADMIN && request.requesterId !== user.id) {
+      throw new ForbiddenException('无权查看该入库申请');
+    }
     const reviews = await this.reviewRepo.find({
       where: { requestId: id },
       order: { createdAt: 'ASC' },
@@ -433,6 +445,7 @@ export class KbIngestionService {
 
   /**
    * 列表查询（按 status / kbId / requesterId 筛选，分页）
+   * H2 修复：非 admin 强制按 requesterId = user.id 过滤，防止信息泄露
    */
   async findAll(query: {
     status?: IngestionRequestStatus;
@@ -440,6 +453,7 @@ export class KbIngestionService {
     requesterId?: string;
     page?: number;
     pageSize?: number;
+    user: AuthUser;
   }): Promise<{ items: KbIngestionRequest[]; total: number }> {
     const page = Math.max(1, query.page ?? 1);
     const pageSize = Math.min(100, Math.max(1, query.pageSize ?? 20));
@@ -449,9 +463,16 @@ export class KbIngestionService {
       .skip((page - 1) * pageSize)
       .take(pageSize);
 
+    // 非 admin 强制只看自己创建的申请
+    if (query.user.role !== UserRole.ADMIN) {
+      qb.andWhere('r.requesterId = :uid', { uid: query.user.id });
+    } else if (query.requesterId) {
+      // admin 可按 requesterId 筛选
+      qb.andWhere('r.requesterId = :requesterId', { requesterId: query.requesterId });
+    }
+
     if (query.status) qb.andWhere('r.status = :status', { status: query.status });
     if (query.kbId) qb.andWhere('r.kbId = :kbId', { kbId: query.kbId });
-    if (query.requesterId) qb.andWhere('r.requesterId = :requesterId', { requesterId: query.requesterId });
 
     const [items, total] = await qb.getManyAndCount();
     return { items, total };

@@ -62,4 +62,10 @@ EXPOSE 7000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:7000/health',timeout=3).status==200 else 1)"
 
+# H9: 以非 root 用户运行，降低容器逃逸风险
+# python3 监听 7000 端口（>1024），非 root 可正常绑定
+RUN adduser --disabled-password --gecos '' --no-create-home appuser && \
+    chown -R appuser /opt
+USER appuser
+
 CMD ["python3", "/opt/server.py"]

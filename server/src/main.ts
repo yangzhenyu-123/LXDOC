@@ -1,12 +1,16 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import helmet from 'helmet';
+import cookieParser from 'cookie-parser';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule);
+
+  // cookie-parser：解析 httpOnly cookie 中的 access/refresh token（H8 修复）
+  app.use(cookieParser());
 
   // 安全响应头：CSP、X-Content-Type-Options、X-Frame-Options、HSTS 等
   // 仅对后端 API 生效（nginx 侧已对静态前端资源补头，但 /api 反代路径未透传）

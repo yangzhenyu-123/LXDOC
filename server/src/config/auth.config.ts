@@ -38,3 +38,57 @@ export const authConfig = {
     return getOverrideBool('auth.allowSignup', (process.env.ALLOW_SIGNUP ?? 'false').toLowerCase() === 'true');
   },
 };
+
+/**
+ * H8 修复：access/refresh token 改 httpOnly cookie 存储
+ *
+ * cookie 命名（与前端约定，前端不再读写，仅由后端 Set-Cookie）：
+ * - lxdoc_access_token：access token，httpOnly + SameSite=Lax + Secure(生产)
+ * - lxdoc_refresh_token：refresh token，httpOnly + SameSite=Lax + Secure(生产) + 7d maxAge
+ *
+ * 前端 axios 需 withCredentials: true 才会携带 cookie；CORS 已在 main.ts 配置 credentials: true。
+ */
+export const ACCESS_TOKEN_COOKIE = 'lxdoc_access_token';
+export const REFRESH_TOKEN_COOKIE = 'lxdoc_refresh_token';
+
+/** 是否生产环境（用于决定 cookie 的 Secure 标志） */
+const isProdCookie = process.env.NODE_ENV === 'production';
+
+/**
+ * 解析 expires 字符串（如 '15m'、'7d'、'2h'）为毫秒数
+ * 用于同步设置 cookie maxAge 与 JWT 实际有效期
+ */
+function parseExpiresToMs(expires: string): number {
+  const m = /^(\d+)\s*(s|m|h|d)$/.exec(expires.trim());
+  if (!m) return 15 * 60 * 1000; // 回退 15 分钟
+  const n = Number(m[1]);
+  switch (m[2]) {
+    case 's':
+      return n * 1000;
+    case 'm':
+      return n * 60 * 1000;
+    case 'h':
+      return n * 60 * 60 * 1000;
+    case 'd':
+      return n * 24 * 60 * 60 * 1000;
+    default:
+      return 15 * 60 * 1000;
+  }
+}
+
+/** access cookie 选项（httpOnly，无 maxAge → 会话 cookie，浏览器关闭即清，token 自身 15min 过期） */
+export const accessTokenCookieOptions = {
+  httpOnly: true,
+  secure: isProdCookie,
+  sameSite: 'lax' as const,
+  path: '/',
+};
+
+/** refresh cookie 选项（httpOnly + 7d maxAge，跨浏览器重启保持登录态） */
+export const refreshTokenCookieOptions = {
+  httpOnly: true,
+  secure: isProdCookie,
+  sameSite: 'lax' as const,
+  path: '/',
+  maxAge: parseExpiresToMs(process.env.JWT_REFRESH_EXPIRES ?? '7d'),
+};

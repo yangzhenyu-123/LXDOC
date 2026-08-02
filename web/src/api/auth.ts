@@ -18,17 +18,20 @@ export interface AuthUser {
 }
 
 // 登录/注册响应
+// H8 修复：access/refresh token 改 httpOnly cookie，响应体中的 token 字段保留以兼容旧客户端，
+// SPA 前端不再读取/存储 token，仅消费 user。cookie 由后端 Set-Cookie 自动写入。
 export interface LoginResponse {
-  accessToken: string;
-  refreshToken: string;
+  accessToken?: string;
+  refreshToken?: string;
   user: AuthUser;
 }
 
 // 刷新令牌响应
 // 后端 refresh 采用轮换：每次返回新的 access + 新的 refresh（旧 refresh 立即失效）
+// H8：token 通过 cookie 自动轮换，响应体字段保留以兼容旧客户端，SPA 忽略
 export interface RefreshResponse {
-  accessToken: string;
-  refreshToken: string;
+  accessToken?: string;
+  refreshToken?: string;
 }
 
 // 注册请求体
@@ -41,6 +44,7 @@ export interface RegisterDto {
 /**
  * 登录
  * POST /auth/login
+ * H8：token 经 httpOnly cookie 下发，前端仅消费 user
  */
 export function loginApi(
   email: string,
@@ -63,19 +67,19 @@ export function registerApi(dto: RegisterDto): Promise<LoginResponse> {
 /**
  * 刷新令牌
  * POST /auth/refresh
+ * H8：refresh token 由 httpOnly cookie 自动携带，无需前端传参
  */
-export function refreshApi(refreshToken: string): Promise<RefreshResponse> {
-  return client.post<RefreshResponse, RefreshResponse>('/auth/refresh', {
-    refreshToken,
-  });
+export function refreshApi(): Promise<RefreshResponse> {
+  return client.post<RefreshResponse, RefreshResponse>('/auth/refresh');
 }
 
 /**
  * 登出
  * POST /auth/logout
+ * H8：refresh token 由 httpOnly cookie 自动携带，无需前端传参；后端清除 cookie
  */
-export function logoutApi(refreshToken: string): Promise<void> {
-  return client.post('/auth/logout', { refreshToken });
+export function logoutApi(): Promise<void> {
+  return client.post('/auth/logout');
 }
 
 /**

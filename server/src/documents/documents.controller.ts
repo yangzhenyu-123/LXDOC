@@ -19,6 +19,7 @@ import {
   ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { DocumentsService } from './documents.service';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -158,6 +159,8 @@ export class DocumentsController {
   @ApiOperation({ summary: 'AI 总结文档生成新 Markdown（editor+）' })
   @ApiParam({ name: 'id', description: '文档 ID', type: String })
   @Roles(UserRole.ADMIN, UserRole.EDITOR)
+  // H10 修复：AI 总结限流（10 次/分钟/用户），LLM 调用 + 新建文档成本高
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Audit(AuditAction.DOCUMENT_CREATE, 'document')
   @Post('documents/:id/summarize')
   summarize(

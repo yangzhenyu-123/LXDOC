@@ -10,27 +10,27 @@ import {
 // 仅引入类型与重置函数，规避 client ↔ store 循环依赖（client 动态 import store）
 import { resetRefreshFailure } from '@/api/client';
 
-// localStorage 持久化键
-const LS_ACCESS_TOKEN = 'lxdoc_access_token';
-const LS_REFRESH_TOKEN = 'lxdoc_refresh_token';
+/**
+ * H8 修复：access/refresh token 改 httpOnly cookie 存储，前端不再持有 token。
+ * - state 仅保留 user（非敏感，用于 UI 状态与权限判断）
+ * - isLoggedIn 基于 user 是否存在判断；若 cookie 已过期，首个 API 请求 401 →
+ *   client 拦截器自动 refresh，refresh 失败则 forceLogout 清空 user
+ * - user 持久化到 localStorage，刷新页面恢复 UI；token 由 cookie 管理，不持久化
+ */
 const LS_USER = 'lxdoc_user';
 
 interface AuthState {
-  accessToken: string | null;
-  refreshToken: string | null;
   user: AuthUser | null;
 }
 
 export const useAuthStore = defineStore('auth', {
   state: (): AuthState => ({
-    accessToken: null,
-    refreshToken: null,
     user: null,
   }),
 
   getters: {
-    // 是否已登录
-    isLoggedIn: (state): boolean => !!state.accessToken,
+    // 是否已登录：基于本地 user 判断（cookie 真实状态由后端校验，过期时自动 refresh/登出）
+    isLoggedIn: (state): boolean => !!state.user,
     // 是否为管理员
     isAdmin: (state): boolean => state.user?.role === 'admin',
     // 是否为编辑
@@ -42,14 +42,12 @@ export const useAuthStore = defineStore('auth', {
 
   actions: {
     /**
-     * 登录：调用后端 login 接口，设置 state 并持久化
+     * 登录：调用后端 login 接口，token 经 httpOnly cookie 下发，仅保存 user
      */
     async login(email: string, password: string): Promise<AuthUser> {
       const res = await loginApi(email, password);
-      this.accessToken = res.accessToken;
-      this.refreshToken = res.refreshToken;
       this.user = res.user;
-      this.persist();
+      this.persistUser();
       // 新登录重置 client 的 refresh 失败标记
       resetRefreshFailure();
       return res.user;
@@ -60,22 +58,10 @@ export const useAuthStore = defineStore('auth', {
      */
     async register(dto: RegisterDto): Promise<AuthUser> {
       const res = await registerApi(dto);
-      this.accessToken = res.accessToken;
-      this.refreshToken = res.refreshToken;
       this.user = res.user;
-      this.persist();
+      this.persistUser();
       resetRefreshFailure();
       return res.user;
-    },
-
-    /**
-     * 仅更新 tokens（供 axios 拦截器调用）
-     */
-    setTokens(access: string, refresh?: string): void {
-      this.accessToken = access;
-      if (refresh) this.refreshToken = refresh;
-      localStorage.setItem(LS_ACCESS_TOKEN, access);
-      if (refresh) localStorage.setItem(LS_REFRESH_TOKEN, refresh);
     },
 
     /**
@@ -87,13 +73,11 @@ export const useAuthStore = defineStore('auth', {
     },
 
     /**
-     * 主动登出：调用后端 logout，再清空本地状态
+     * 主动登出：调用后端 logout（清除 httpOnly cookie），再清空本地 user
      */
     async logout(): Promise<void> {
       try {
-        if (this.refreshToken) {
-          await logoutApi(this.refreshToken);
-        }
+        await logoutApi();
       } catch (e) {
         // 即使后端登出失败也清空本地态
         console.warn('[auth] logout api failed, still clearing local state', e);
@@ -103,21 +87,19 @@ export const useAuthStore = defineStore('auth', {
     },
 
     /**
-     * 强制登出：不调用后端，仅清空本地（refresh 失败时使用）
+     * 强制登出：不调用后端，仅清空本地 user（refresh 失败时使用）
      */
     forceLogout(): void {
       this.clear();
     },
 
     /**
-     * 从 localStorage 恢复（应用启动时调用）
+     * 从 localStorage 恢复 user（应用启动时调用）
+     * token 由 httpOnly cookie 管理，无需恢复；cookie 有效则后续请求自动携带，
+     * 无效则首个 API 请求 401 → refresh → 失败则 forceLogout
      */
     restore(): void {
-      const access = localStorage.getItem(LS_ACCESS_TOKEN);
-      const refresh = localStorage.getItem(LS_REFRESH_TOKEN);
       const userJson = localStorage.getItem(LS_USER);
-      this.accessToken = access;
-      this.refreshToken = refresh;
       if (userJson) {
         try {
           this.user = JSON.parse(userJson) as AuthUser;
@@ -130,46 +112,27 @@ export const useAuthStore = defineStore('auth', {
     },
 
     /**
-     * 刷新令牌：后端轮换，成功后同时更新 access + 新 refresh；失败抛出
+     * 刷新令牌：后端轮换 Set-Cookie，前端无需处理 token；仅用于主动触发刷新场景
+     * 失败时抛出，由调用方处理
      */
-    async refresh(): Promise<string> {
-      if (!this.refreshToken) {
-        throw new Error('no refresh token');
-      }
-      const res = await refreshApi(this.refreshToken);
-      this.accessToken = res.accessToken;
-      // 后端轮换返回新 refresh token，需一并持久化
-      if (res.refreshToken) {
-        this.refreshToken = res.refreshToken;
-      }
-      this.persist();
-      return res.accessToken;
+    async refresh(): Promise<void> {
+      await refreshApi();
     },
 
     /**
-     * 持久化到 localStorage
+     * 持久化 user 到 localStorage
      */
-    persist(): void {
-      if (this.accessToken) {
-        localStorage.setItem(LS_ACCESS_TOKEN, this.accessToken);
-      }
-      if (this.refreshToken) {
-        localStorage.setItem(LS_REFRESH_TOKEN, this.refreshToken);
-      }
+    persistUser(): void {
       if (this.user) {
         localStorage.setItem(LS_USER, JSON.stringify(this.user));
       }
     },
 
     /**
-     * 清空 state + localStorage
+     * 清空 state + localStorage（仅 user，token 由后端 cookie 管理）
      */
     clear(): void {
-      this.accessToken = null;
-      this.refreshToken = null;
       this.user = null;
-      localStorage.removeItem(LS_ACCESS_TOKEN);
-      localStorage.removeItem(LS_REFRESH_TOKEN);
       localStorage.removeItem(LS_USER);
     },
   },
