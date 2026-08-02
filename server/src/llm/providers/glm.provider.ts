@@ -10,6 +10,7 @@ import {
   LlmStreamProvider,
 } from '../llm-provider.interface';
 import { llmConfig } from '../../config/llm.config';
+import { parseSseLine, isDataLine } from './glm-sse.utils';
 
 /**
  * GLM Provider（内网 GLM5.2，OpenAI 兼容接口）
@@ -166,30 +167,16 @@ export class GlmProvider implements LlmProvider, LlmStreamProvider {
         // 最后一行可能不完整，留在 buffer
         buffer = lines.pop() ?? '';
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith(':')) continue; // 空行或注释行（心跳）
-          if (!trimmed.startsWith('data:')) continue;
-          const data = trimmed.slice(5).trim();
-          if (data === '[DONE]') {
-            done = true;
-            break;
-          }
-          try {
-            const chunk: any = JSON.parse(data);
-            const delta = chunk?.choices?.[0]?.delta;
-            if (!delta) continue;
-            // 思考链增量（GLM-5.2 reasoning_content）
-            if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
-              yield { type: 'reasoning', content: delta.reasoning_content };
+          if (!isDataLine(line)) continue;
+          const parsed = parseSseLine(line);
+          for (const evt of parsed) {
+            if (evt.type === 'done') {
+              done = true;
+              break;
             }
-            // 正文增量
-            if (typeof delta.content === 'string' && delta.content) {
-              yield { type: 'delta', content: delta.content };
-            }
-          } catch {
-            // 单行 JSON 解析失败不阻塞流，跳过
-            this.logger.warn(`GLM stream 行解析失败：${data.slice(0, 100)}`);
+            yield evt;
           }
+          if (done) break;
         }
       }
       yield { type: 'done' };

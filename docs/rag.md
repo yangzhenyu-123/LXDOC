@@ -453,3 +453,67 @@ curl -N -X POST "http://localhost:3000/api/knowledge-bases/:id/ask" \
   -H "Content-Type: application/json" \
   -d '{"query":"向量检索用什么模型？"}'
 ```
+
+---
+
+## P6 自动化测试
+
+### 测试分层
+
+| 层级 | 框架 | 运行 | 范围 |
+|------|------|------|------|
+| L1 单元 | jest + ts-jest | `pnpm test` | 纯函数（RRF/阈值/prompt/SSE解析），无外部依赖 |
+| L3 集成 | jest + testcontainers PG | `pnpm test:integration` | KB CRUD + retrieve + RAG ask 全场景，真 pgvector + mock GLM/TEI |
+| 前端单元 | vitest + happy-dom | `pnpm test`（web/） | parseSseEvent + 引用上标渲染 |
+
+### 运行命令
+
+```bash
+# 后端（server/）
+pnpm test                    # L1 单元测试（~5s）
+pnpm test:integration        # L3 集成测试（~13s，需连 <PROD_HOST> PG）
+pnpm test:all                # 单元 + 集成
+pnpm test:cov                # 覆盖率
+
+# 前端（web/）
+pnpm test                    # vitest 单元测试（~1.5s）
+pnpm test:watch              # watch 模式
+```
+
+### 集成测试数据库隔离
+
+不用 Testcontainers（开发机 Docker 18.09 太旧 + 镜像下载慢），改用**远程 PG + 独立 schema**：
+
+- `test/db-helpers.ts` 在 <PROD_HOST> PG 创建 `test_<时间戳>_<随机>` schema
+- `extra.options = '-c search_path=test_xxx,public'` 让每个连接池连接自动走 test schema
+- test schema 在前保证表名解析优先 test（不污染生产 public），public 在后保证 vector 类型可见
+- `afterEach` 执行 `DROP SCHEMA CASCADE` 彻底清理
+- KbChunk 实体 `synchronize: false`，helper 手动建 kb_chunks 表 + embedding vector(1024) + HNSW/GIN 索引
+
+### mock 外部服务
+
+- **GLM chat**：`test/mock-server.ts` 起 express 假 `/chat/completions` SSE 端点，可控 chunks/错误/延迟
+- **TEI embedding**：同 mock-server 的 `/embeddings` 端点，可控返回向量
+- **EmbeddingService**：`test/mock-embedding.ts` 提供确定性向量 + 自定义向量映射
+
+### 测试覆盖的 bug 修复（TDD）
+
+1. **T6 中断检测 bug**：GlmProvider 捕获 AbortError 后 `return`（静默结束），RagService 的 for-await 正常退出未检测 `signal.aborted`，错误 yield done。修复：for-await 后补 `if (signal?.aborted) { yield cancelled; return; }`
+2. **T7 KB 计数器 bug**：`addDocument` 每次 `documentCount + 1`（重复加入也递增），`chunkCount = saved.length`（覆盖非累加）。修复：先查旧 chunk 数，`documentCount` 仅新文档 +1，`chunkCount` 用 delta increment
+3. **T9 前端正则 bug**：`renderAnswer` 的 `REF_PATTERN` 括号不平衡（组1未闭合），原生 RegExp 报 SyntaxError。修复：`/(\[\d+(?:[,\s\d]*)\])/g`
+
+### 纯函数提取（为可测性）
+
+| 文件 | 提取的纯函数 | 原位置 |
+|------|-------------|--------|
+| `server/src/knowledge-base/retrieval.utils.ts` | `rrfFuse` + VectorHit/TrgmHit/FusedResult 类型 | RetrievalService.rrfFuse (private) |
+| `server/src/knowledge-base/rag.utils.ts` | `classifyScore` / `buildKnowledge` / `buildPrompt` | RagService (private/inline) |
+| `server/src/llm/providers/glm-sse.utils.ts` | `parseSseLine` / `isDataLine` | GlmProvider.streamChat (inline) |
+| `web/src/utils/rag-refs.ts` | `extractRefTokens` / `buildRefTags` / `replaceRefPlaceholders` | KbAskView.renderAnswer (inline) |
+
+### 测试统计
+
+- 后端单元：51 个（5 套件）— infra + retrieval.utils + rag.utils + glm-sse.utils + mock-server
+- 后端集成：39 个（3 套件）— db-helpers + kb-service + rag-service
+- 前端单元：32 个（3 套件）— infra + rag-refs + parse-sse-event
+- **合计 122 个测试，全量 ~20s**

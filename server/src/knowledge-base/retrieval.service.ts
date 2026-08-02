@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { EmbeddingService } from './embedding.service';
+import { rrfFuse, VectorHit, TrgmHit, FusedResult } from './retrieval.utils';
 
 /**
  * 检索结果项
@@ -101,8 +102,8 @@ export class RetrievalService {
     // 2. 词法召回
     const trgmHits = await this.trgmSearch(kbId, query, cfg.trgmTopK);
 
-    // 3. RRF 融合
-    const fused = this.rrfFuse(vectorHits, trgmHits, cfg.rrfK);
+    // 3. RRF 融合（纯函数，从 retrieval.utils 导入）
+    const fused = rrfFuse(vectorHits, trgmHits, cfg.rrfK);
 
     // 4. 取 finalTopK
     const results = fused.slice(0, cfg.finalTopK).map((f, i) => ({
@@ -187,84 +188,4 @@ export class RetrievalService {
       similarity: r.similarity,
     }));
   }
-
-  /**
-   * RRF 融合
-   * score = 1/(k+rank_v) + 1/(k+rank_t)
-   * 仅一路命中时，该路贡献 1/(k+rank)
-   */
-  private rrfFuse(
-    vectorHits: VectorHit[],
-    trgmHits: TrgmHit[],
-    k: number,
-  ): FusedResult[] {
-    const map = new Map<string, FusedResult>();
-
-    for (const h of vectorHits) {
-      map.set(h.chunkId, {
-        chunkId: h.chunkId,
-        content: h.content,
-        documentId: h.documentId,
-        headingPath: h.headingPath,
-        chunkType: h.chunkType,
-        metadata: h.metadata,
-        score: 1 / (k + h.rank),
-        hitBy: 'vector',
-      });
-    }
-
-    for (const h of trgmHits) {
-      const existing = map.get(h.chunkId);
-      if (existing) {
-        existing.score += 1 / (k + h.rank);
-        existing.hitBy = 'both';
-      } else {
-        map.set(h.chunkId, {
-          chunkId: h.chunkId,
-          content: h.content,
-          documentId: h.documentId,
-          headingPath: h.headingPath,
-          chunkType: h.chunkType,
-          metadata: h.metadata,
-          score: 1 / (k + h.rank),
-          hitBy: 'trgm',
-        });
-      }
-    }
-
-    return Array.from(map.values()).sort((a, b) => b.score - a.score);
-  }
-}
-
-interface VectorHit {
-  chunkId: string;
-  content: string;
-  documentId: string;
-  headingPath: string | null;
-  chunkType: string;
-  metadata: Record<string, any>;
-  rank: number;
-  similarity: number;
-}
-
-interface TrgmHit {
-  chunkId: string;
-  content: string;
-  documentId: string;
-  headingPath: string | null;
-  chunkType: string;
-  metadata: Record<string, any>;
-  rank: number;
-  similarity: number;
-}
-
-interface FusedResult {
-  chunkId: string;
-  content: string;
-  documentId: string;
-  headingPath: string | null;
-  chunkType: string;
-  metadata: Record<string, any>;
-  score: number;
-  hitBy: 'vector' | 'trgm' | 'both';
 }

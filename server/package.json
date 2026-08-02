@@ -5,7 +5,12 @@
   "scripts": {
     "dev": "nest start --watch",
     "build": "nest build",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.ts",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.ts --watch",
+    "test:cov": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.ts --coverage",
+    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.integration.ts",
+    "test:all": "pnpm test && pnpm test:integration"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.0",
@@ -33,11 +38,20 @@
   },
   "devDependencies": {
     "@nestjs/cli": "^10.3.0",
+    "@nestjs/testing": "^10.4.22",
+    "@testcontainers/postgresql": "^12.0.4",
     "@types/bcryptjs": "^2.4.6",
     "@types/express": "^5.0.6",
+    "@types/jest": "^30.0.0",
     "@types/multer": "^1.4.11",
     "@types/node": "^20.11.5",
     "@types/passport-jwt": "^4.0.1",
+    "@types/supertest": "^7.2.1",
+    "express": "^5.2.1",
+    "jest": "^30.4.2",
+    "supertest": "^7.2.2",
+    "testcontainers": "^12.0.4",
+    "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
   }

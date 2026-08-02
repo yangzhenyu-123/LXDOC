@@ -7,6 +7,7 @@ import { marked } from 'marked';
 import { getKb, getKbStats, listKbs, askStream, type KnowledgeBase, type KbStats, type RagEvent, type RagReference } from '@/api/kb';
 import { useAuthStore } from '@/stores/auth';
 import { sanitizeMarkedHtml } from '@/utils/sanitize';
+import { extractRefTokens, replaceRefPlaceholders } from '@/utils/rag-refs';
 
 /**
  * RAG 知识库问答页（核心）
@@ -240,27 +241,11 @@ async function scrollToBottom() {
  */
 function renderAnswer(md: string, msgIdx: number): string {
   if (!md) return '';
-  // 先把 [1] [1,2] [1][2] 形式转成占位符避免被 markdown 解析
-  // 然后渲染 markdown，最后把占位符替换为上标链接
-  const placeholder = (n: string) => `@@REF_${n}@@`;
-  const refPattern = /(\[(\d+(?:[,\s\d]*)\])/g;
-  const tokens: string[] = [];
-  const preprocessed = md.replace(refPattern, (m, p1: string) => {
-    tokens.push(p1);
-    return placeholder(String(tokens.length - 1));
-  });
+  // 引用替换逻辑提取为纯函数（src/utils/rag-refs.ts），便于单元测试
+  const { preprocessed, tokens } = extractRefTokens(md);
   const html = marked.parse(preprocessed, { async: false }) as string;
   const safe = sanitizeMarkedHtml(html);
-  // 把占位符替换为上标链接
-  return safe.replace(/@@REF_(\d+)@@/g, (_, i: string) => {
-    const token = tokens[Number(i)];
-    // 提取 [1,2] 中的数字列表
-    const nums = token.replace(/[\[\]\s]/g, '').split(',').filter(Boolean);
-    const links = nums.map((n) => {
-      return `<sup class="rag-ref-tag" data-ref="${n}" data-msg="${msgIdx}">[${n}]</sup>`;
-    });
-    return links.join('');
-  });
+  return replaceRefPlaceholders(safe, tokens, msgIdx);
 }
 
 /**

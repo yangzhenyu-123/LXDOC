@@ -89,12 +89,22 @@ export class KnowledgeBaseService {
    * 将文档加入知识库
    * 触发：解析文档 content → chunking → embedding → 入库 kb_chunks
    *
+   * 计数器逻辑（T7 修复）：
+   * - documentCount：文档首次加入 +1，重复加入（已存在旧 chunk）不递增（替换语义）
+   * - chunkCount：累加差值（新 chunk 数 - 旧 chunk 数），支持重新切分时增减
+   *
    * @returns 生成的 chunk 数量
    */
   async addDocument(kbId: string, documentId: string): Promise<number> {
     const kb = await this.findOne(kbId);
     const doc = await this.docRepo.findOne({ where: { id: documentId } });
     if (!doc) throw new NotFoundException(`文档 ${documentId} 不存在`);
+
+    // 查旧 chunk 数（判断文档是否已在 KB + 计算 chunkCount 差值）
+    const oldChunkCount = await this.chunkRepo.count({
+      where: { kbId, documentId },
+    });
+    const isExistingDoc = oldChunkCount > 0;
 
     // 若文档已在此 KB，先清除旧 chunk（重新切分）
     await this.chunkRepo.delete({ kbId, documentId });
@@ -153,16 +163,24 @@ export class KnowledgeBaseService {
         );
       }
 
-      // 更新 KB 计数
-      await manager.getRepository(KnowledgeBase).increment(
-        { id: kbId },
-        'documentCount',
-        1,
-      );
-      await manager.getRepository(KnowledgeBase).update(
-        { id: kbId },
-        { chunkCount: saved.length },
-      );
+      // 更新 KB 计数（T7 修复）
+      // documentCount：仅新文档加入时 +1，重复加入不递增
+      if (!isExistingDoc) {
+        await manager.getRepository(KnowledgeBase).increment(
+          { id: kbId },
+          'documentCount',
+          1,
+        );
+      }
+      // chunkCount：累加差值（新 - 旧），支持重新切分时 chunk 数变化
+      const chunkDelta = saved.length - oldChunkCount;
+      if (chunkDelta !== 0) {
+        await manager.getRepository(KnowledgeBase).increment(
+          { id: kbId },
+          'chunkCount',
+          chunkDelta,
+        );
+      }
     });
 
     this.logger.log(`文档 ${doc.title} 加入知识库 ${kb.name}，生成 ${chunkResults.length} chunk`);

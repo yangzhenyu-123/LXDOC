@@ -238,8 +238,10 @@ export async function* askStream(
  *   data: {"type":"delta","content":"..."}
  *
  * 多行 data 按 SSE 规范应拼接，但本协议每事件单行 data，简化处理。
+ *
+ * 导出供前端单元测试覆盖（T9）。
  */
-function parseSseEvent(raw: string): RagEvent | null {
+export function parseSseEvent(raw: string): RagEvent | null {
   const lines = raw.split('\n');
   for (const line of lines) {
     const trimmed = line.trim();
