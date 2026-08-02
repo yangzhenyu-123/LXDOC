@@ -365,5 +365,85 @@ describe('T5 KnowledgeBaseService + RetrievalService 集成测试', () => {
       const results = await retrievalService.retrieve(kbId, '   ');
       expect(results).toEqual([]);
     });
+
+    it('F5 documentIds 过滤：只检索选中文档的 chunk', async () => {
+      const kbId = randomUUID();
+      const docA = randomUUID();
+      const docB = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+      // docA chunk 内容含"目标词"
+      await insertChunk({ kbId, documentId: docA, content: '目标词 内容A', vector: unitVector(0) });
+      // docB chunk 内容也含"目标词"
+      await insertChunk({ kbId, documentId: docB, content: '目标词 内容B', vector: unitVector(0) });
+
+      // mock query embedding 与两者都相似
+      embeddingService = createMockEmbeddingService({
+        vectorMap: new Map([['目标词', unitVector(0)]]),
+      });
+      retrievalService = new RetrievalService(db.ds.manager, embeddingService);
+
+      // 不限文档 → 两条都返回
+      const all = await retrievalService.retrieve(kbId, '目标词', {
+        vectorTopK: 10, trgmTopK: 10, finalTopK: 10,
+      });
+      expect(all.length).toBe(2);
+
+      // 只选 docA → 只返回 docA 的 chunk
+      const filtered = await retrievalService.retrieve(kbId, '目标词', {
+        vectorTopK: 10, trgmTopK: 10, finalTopK: 10,
+        documentIds: [docA],
+      });
+      expect(filtered.length).toBe(1);
+      expect(filtered[0].documentId).toBe(docA);
+      expect(filtered[0].content).toContain('内容A');
+    });
+  });
+
+  // ========== F3 引用预览：getChunk ==========
+
+  describe('F3 getChunk（引用预览）', () => {
+    it('正常返回 chunk 完整内容', async () => {
+      const kbId = randomUUID();
+      const docId = randomUUID();
+      const chunkId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB', $2)`, [kbId, userId]);
+      await db.ds.query(
+        `INSERT INTO kb_chunks (id, kb_id, document_id, chunk_index, content, heading_path, chunk_type, metadata)
+         VALUES ($1, $2, $3, 2, 'chunk 全文内容', '章节>子节', 'text', '{}')`,
+        [chunkId, kbId, docId],
+      );
+
+      const chunk = await kbService.getChunk(kbId, chunkId);
+      expect(chunk.id).toBe(chunkId);
+      expect(chunk.documentId).toBe(docId);
+      expect(chunk.chunkIndex).toBe(2);
+      expect(chunk.content).toBe('chunk 全文内容');
+      expect(chunk.headingPath).toBe('章节>子节');
+      expect(chunk.parentChunkId).toBeNull();
+    });
+
+    it('chunk 不属于指定 KB 时抛 NotFoundException（防越权）', async () => {
+      const kbId1 = randomUUID();
+      const kbId2 = randomUUID();
+      const docId = randomUUID();
+      const chunkId = randomUUID();
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB1', $2)`, [kbId1, userId]);
+      await db.ds.query(`INSERT INTO kb_knowledge_bases (id, name, created_by) VALUES ($1, 'KB2', $2)`, [kbId2, userId]);
+      // chunk 属于 kbId1
+      await db.ds.query(
+        `INSERT INTO kb_chunks (id, kb_id, document_id, chunk_index, content, chunk_type, metadata)
+         VALUES ($1, $2, $3, 0, '内容', 'text', '{}')`,
+        [chunkId, kbId1, docId],
+      );
+
+      // 用 kbId2 查 → 不应找到
+      await expect(kbService.getChunk(kbId2, chunkId)).rejects.toThrow(/不属于知识库/);
+    });
+
+    it('KB 不存在时抛 NotFoundException', async () => {
+      const fakeKbId = randomUUID();
+      const fakeChunkId = randomUUID();
+      await expect(kbService.getChunk(fakeKbId, fakeChunkId)).rejects.toThrow(/不存在/);
+    });
   });
 });

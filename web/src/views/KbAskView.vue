@@ -4,10 +4,10 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { ArrowLeft, ArrowRight, ArrowDown, ChatLineRound, CircleClose, Document, Promotion } from '@element-plus/icons-vue';
 import { marked } from 'marked';
-import { getKb, getKbStats, listKbs, askStream, type KnowledgeBase, type KbStats, type RagEvent, type RagReference } from '@/api/kb';
 import { useAuthStore } from '@/stores/auth';
 import { sanitizeMarkedHtml } from '@/utils/sanitize';
 import { extractRefTokens, replaceRefPlaceholders } from '@/utils/rag-refs';
+import { getKb, askStream, retrieve, listKbs, getKbStats, listKbDocuments, getChunk, type KnowledgeBase, type KbStats, type KbDocument, type RagEvent, type RagReference, type HistoryMessage, type ChunkDetail } from '@/api/kb';
 
 /**
  * RAG 知识库问答页（核心）
@@ -73,6 +73,21 @@ const refsExpanded = ref<Record<number, boolean>>({});
 // 思考链是否展开（每条 assistant 消息独立）
 const reasoningExpanded = ref<Record<number, boolean>>({});
 
+// 文档选择器：限定检索的文档范围（F6）
+// 空数组 = 全 KB 检索；非空 = 只在选中文档中检索
+const selectedDocIds = ref<string[]>([]);
+// 知识库文档列表（用于 F6 文档选择器下拉）
+const kbDocuments = ref<KbDocument[]>([]);
+// 文档选择器下拉是否展开
+const docSelectorVisible = ref(false);
+
+// 引用预览弹窗（F4）
+const chunkPreviewVisible = ref(false);
+const chunkPreviewLoading = ref(false);
+const chunkPreviewData = ref<ChunkDetail | null>(null);
+// 预览弹窗顶部展示的文档标题（从 ref 取，避免再查文档）
+const chunkPreviewDocTitle = ref('');
+
 // ============ 计算属性 ============
 
 const isEmpty = computed(() => messages.value.length === 0);
@@ -94,12 +109,16 @@ async function loadKbs() {
 async function loadCurrentKb(id: string) {
   kbLoading.value = true;
   try {
-    const [kb, stats] = await Promise.all([
+    const [kb, stats, docs] = await Promise.all([
       getKb(id),
       getKbStats(id).catch(() => null),
+      listKbDocuments(id).catch(() => [] as KbDocument[]),
     ]);
     currentKb.value = kb;
     currentStats.value = stats;
+    kbDocuments.value = docs;
+    // 切换 KB 时重置文档选择器（避免上次选择残留到新 KB）
+    selectedDocIds.value = [];
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.message ?? '加载知识库失败');
     router.push('/kb');
@@ -142,8 +161,24 @@ async function sendQuery() {
   streaming.value = true;
   abortController = new AbortController();
 
+  // 构造历史对话（多轮对话）：取已完成的 user + assistant 消息对
+  // 过滤掉 streaming/error/cancelled 状态的 assistant 消息（未完成的不传）
+  const history: HistoryMessage[] = [];
+  for (const m of messages.value) {
+    if (m.role === 'user') {
+      history.push({ role: 'user', content: m.content });
+    } else if (m.role === 'assistant' && m.status === 'done') {
+      history.push({ role: 'assistant', content: m.content });
+    }
+  }
+  // 排除当前刚加的 user 消息（它已是当前 query，不重复传）
+  history.pop();
+
   try {
-    for await (const evt of askStream(currentKb.value.id, q, abortController.signal)) {
+    for await (const evt of askStream(currentKb.value.id, q, abortController.signal, {
+      history,
+      ...(selectedDocIds.value.length > 0 ? { documentIds: selectedDocIds.value } : {}),
+    })) {
       const msg = messages.value[streamingIdx.value];
       if (!msg) break;
       handleEvent(evt, msg, streamingIdx.value);
@@ -276,6 +311,23 @@ function toggleRefs(idx: number) {
 
 function toggleReasoning(idx: number) {
   reasoningExpanded.value[idx] = !reasoningExpanded.value[idx];
+}
+
+// F4 打开 chunk 全文预览弹窗
+async function openChunkPreview(ref: RagReference) {
+  if (!currentKb.value) return;
+  chunkPreviewVisible.value = true;
+  chunkPreviewLoading.value = true;
+  chunkPreviewData.value = null;
+  chunkPreviewDocTitle.value = ref.documentTitle;
+  try {
+    chunkPreviewData.value = await getChunk(currentKb.value.id, ref.chunkId);
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.message ?? '加载 chunk 失败');
+    chunkPreviewVisible.value = false;
+  } finally {
+    chunkPreviewLoading.value = false;
+  }
 }
 
 function formatScore(s: number): string {
@@ -443,6 +495,16 @@ marked.setOptions({ gfm: true, breaks: true });
                     章节：{{ ref.headingPath }}
                   </div>
                   <div class="ref-snippet">{{ ref.snippet }}</div>
+                  <div class="ref-actions">
+                    <el-link
+                      type="primary"
+                      :underline="false"
+                      size="small"
+                      @click="openChunkPreview(ref)"
+                    >
+                      查看全文
+                    </el-link>
+                  </div>
                 </div>
               </div>
             </div>
@@ -491,6 +553,41 @@ marked.setOptions({ gfm: true, breaks: true });
 
       <!-- 输入区 -->
       <div class="input-area">
+        <!-- F6 文档选择器：限定检索范围 -->
+        <div v-if="currentKb && kbDocuments.length > 0" class="doc-selector-row">
+          <el-select
+            v-model="selectedDocIds"
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
+            :max-collapse-tags="2"
+            placeholder="检索范围：全部文档"
+            size="small"
+            style="width: 360px"
+            :disabled="streaming"
+          >
+            <el-option
+              v-for="doc in kbDocuments"
+              :key="doc.documentId"
+              :label="doc.title"
+              :value="doc.documentId"
+            >
+              <span style="float: left">{{ doc.title }}</span>
+              <span style="float: right; color: var(--el-text-color-secondary); font-size: 12px;">
+                {{ doc.format }} · {{ doc.chunkCount }}块
+              </span>
+            </el-option>
+          </el-select>
+          <el-button
+            v-if="selectedDocIds.length > 0"
+            text
+            size="small"
+            @click="selectedDocIds = []"
+            :disabled="streaming"
+          >
+            清空选择
+          </el-button>
+        </div>
         <div class="input-row">
           <el-input
             v-model="inputQuery"
@@ -521,11 +618,39 @@ marked.setOptions({ gfm: true, breaks: true });
           </el-button>
         </div>
         <div class="input-hint">
-          <span v-if="currentKb">当前知识库：{{ currentKb.name }}</span>
+          <span v-if="currentKb">
+            当前知识库：{{ currentKb.name }}
+            <template v-if="selectedDocIds.length > 0">
+              · 限定 {{ selectedDocIds.length }} 个文档
+            </template>
+          </span>
           <span v-else>请先选择知识库</span>
         </div>
       </div>
     </main>
+
+    <!-- F4 引用预览弹窗 -->
+    <el-dialog
+      v-model="chunkPreviewVisible"
+      :title="`引用全文 - ${chunkPreviewDocTitle}`"
+      width="720px"
+      top="8vh"
+      class="chunk-preview-dialog"
+    >
+      <div v-loading="chunkPreviewLoading" class="chunk-preview-body">
+        <template v-if="chunkPreviewData">
+          <div class="chunk-preview-meta">
+            <el-tag size="small" effect="plain">
+              chunk #{{ chunkPreviewData.chunkIndex }}
+            </el-tag>
+            <el-tag v-if="chunkPreviewData.headingPath" size="small" effect="plain" type="info">
+              {{ chunkPreviewData.headingPath }}
+            </el-tag>
+          </div>
+          <pre class="chunk-preview-content">{{ chunkPreviewData.content }}</pre>
+        </template>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -839,6 +964,38 @@ marked.setOptions({ gfm: true, breaks: true });
   -webkit-box-orient: vertical;
 }
 
+.ref-actions {
+  margin-top: 6px;
+  text-align: right;
+}
+
+/* ============ F4 引用预览弹窗 ============ */
+.chunk-preview-body {
+  min-height: 200px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.chunk-preview-meta {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.chunk-preview-content {
+  font-family: var(--lx-font-mono, 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--lx-text-primary, #303133);
+  background: var(--lx-bg-light, #f5f7fa);
+  padding: 16px;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
 /* ============ 回答正文 ============ */
 .answer-content {
   white-space: normal;
@@ -909,6 +1066,12 @@ marked.setOptions({ gfm: true, breaks: true });
   background: var(--lx-bg-elevated);
   padding: var(--lx-space-3) var(--lx-space-5);
   flex-shrink: 0;
+}
+.doc-selector-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 .input-row {
   display: flex;

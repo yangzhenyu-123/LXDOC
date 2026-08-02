@@ -517,3 +517,101 @@ pnpm test:watch              # watch 模式
 - 后端集成：39 个（3 套件）— db-helpers + kb-service + rag-service
 - 前端单元：32 个（3 套件）— infra + rag-refs + parse-sse-event
 - **合计 122 个测试，全量 ~20s**
+
+---
+
+## P7 RAG 功能增强
+
+P6 完成测试体系后，P7 在已验证的 RAG 基线上叠加三项用户可感知的功能增强：
+
+| 功能 | 后端 | 前端 | 测试 |
+|------|------|------|------|
+| 多轮对话 | F1：AskDto.history + RagService ask 传 history + truncateHistory 截断 | F2：askStream 传 history + ChatMessage 累积 + 清空时重置 | 9 单元 + 3 集成 |
+| 引用预览弹窗 | F3：GET `/:id/chunks/:chunkId` + getChunk（含越权校验） | F4：el-dialog + getChunk API + "查看全文"链接 | 3 集成 |
+| 文档选择器 | F5：retrieve / vectorSearch / trgmSearch 加 docFilter（`document_id = ANY($N::uuid[])`） | F6：el-select multiple + selectedDocIds 传入 askStream | 1 集成 |
+
+### F1+F2 多轮对话
+
+**目标**：用户问"它的版本是多少"时，模型理解"它"指代上一轮的"RAG"，无需用户重复上下文。
+
+**后端**：
+
+- `AskDto` 新增 `history: HistoryMessageDto[]`（`@ValidateNested({ each: true })` + `@Type(() => HistoryMessageDto)`），role ∈ `'user'|'assistant'`，content ≤ 4000 字符
+- `RagService.ask` 签名改为 `(kbId, query, signal?, options?: { history?, documentIds?, config? })`，旧 `ask(kbId, query)` / `ask(kbId, query, signal)` 调用完全兼容
+- `rag.utils.ts` 新增：
+  - `HistoryMessage` 接口
+  - `truncateHistory(history, maxRounds=5, maxChars=4000)`：从末尾向前保留最近 N 轮（role 变化计一轮）+ 总字符上限，防 token 爆炸
+  - `buildPrompt(query, knowledge, history?)`：history 插入 system 与当前 user 之间，原 `[system, user]` 退化为无 history 调用
+- `RagService.ask` 在调 buildPrompt 前先 `truncateHistory`，日志加 `history=N` 字段便于调试
+
+**前端**：
+
+- `askStream` 第三参数 signal 不变，新增第四参数 `options?: { history?, documentIds? }`
+- `KbAskView.sendQuery` 在发起流前从 `messages.value` 构造 history：取所有已完成（`status: 'done'`）的 user/assistant 消息对，最后一条 user（当前 query）pop 掉避免重复
+- 清空对话（`clearChat`）将 `messages = []`，下次 sendQuery 自然 history 为空
+
+**测试**：
+
+- `rag.utils.spec.ts` 新增 9 个：buildPrompt 含历史 4 + truncateHistory 5（空/短/超轮/超字符/顺序）
+- `rag-service.integ.spec.ts` 新增 3 个：history 传入 LLM（验 messages 4 条）/ 空 history 兼容 / 长 history 截断
+
+### F3+F4 引用预览弹窗
+
+**目标**：用户点引用 [1] 的"查看全文"可看到该 chunk 完整内容，不只 snippet 前 3 行。
+
+**后端**：
+
+- `GET /knowledge-bases/:id/chunks/:chunkId` 返回 `{ id, documentId, chunkIndex, content, headingPath, parentChunkId }`
+- `KnowledgeBaseService.getChunk(kbId, chunkId)`：
+  - 先 `findOne(kbId)` 校验 KB 存在
+  - `chunkRepo.findOne({ where: { id: chunkId, kbId } })` 双条件查询——chunk 不属于该 KB 抛 `NotFoundException`，**防跨知识库越权**
+  - 不返回 embedding 列（体积大且无业务意义）
+
+**前端**：
+
+- `web/src/api/kb.ts` 新增 `getChunk(kbId, chunkId)` + `ChunkDetail` 接口
+- `KbAskView` 引用列表每条加"查看全文" `el-link`，点击 `openChunkPreview(ref)`：
+  - 设置 `chunkPreviewVisible = true`、`chunkPreviewLoading = true`
+  - 调 `getChunk` 拉数据填 `chunkPreviewData`
+  - 弹窗标题展示文档标题（从 ref 取，避免再查文档）
+  - 错误时 toast + 关弹窗
+- 弹窗用 `el-dialog` + `<pre>` 展示 chunk content（保留换行），顶部 meta 显示 chunk_index + headingPath
+
+**测试**：
+
+- `kb-service.integ.spec.ts` 新增 3 个：正常返回 / 越权拒绝 / KB 不存在
+
+### F5+F6 文档选择器
+
+**目标**：用户可限定只在某几个文档中检索，避免跨文档噪声。
+
+**后端**（检索层在 F1 一起实现，F5 补 retrieve 端点参数）：
+
+- `RetrievalConfig` 新增 `documentIds?: string[]`
+- `RetrievalService.retrieve` 把 `documentIds` 透传给 `vectorSearch` + `trgmSearch`
+- `vectorSearch` / `trgmSearch` 动态拼 `AND document_id = ANY($N::uuid[])`，空数组不过滤（全 KB 检索）
+- `RagService.ask` options.documentIds → RetrievalConfig.documentIds
+- `GET /:id/retrieve?documentIds=uuid1,uuid2,...` query 参数逗号分隔
+- `POST /:id/ask` body.documentIds
+
+**前端**：
+
+- `askStream` options.documentIds 非空时加入 body
+- `retrieve(kbId, query, topK, documentIds)` 加第四参数，非空时拼 query `documentIds=uuid1,uuid2`
+- `KbAskView` 顶部输入框上方加 `el-select multiple` 文档选择器：
+  - 选项来自 `listKbDocuments(kbId)`（已在 `loadCurrentKb` 并行加载）
+  - 选项 label 显示文档标题 + 右侧 format/chunkCount 元信息
+  - 切换 KB 时 `selectedDocIds = []`（防上次选择残留到新 KB）
+  - 选中时输入框下方 hint 显示"限定 N 个文档"
+  - `sendQuery` 把 `selectedDocIds` 传入 askStream
+
+**测试**：
+
+- `kb-service.integ.spec.ts` 新增 1 个：documentIds 过滤（docA + docB 都含目标词，不限返回 2 条，限 docA 只返回 1 条）
+
+### P7 测试统计
+
+- 后端单元：60 个（原 51 + 新增 9）
+- 后端集成：46 个（原 39 + 新增 7：F1×3 + F2×3 + F3×1）
+- 前端单元：32 个（无新增纯函数，F2/F3/F4 都是组件交互，靠 vue-tsc 类型检查 + 手动验证）
+- **合计 138 个测试，全量 ~22s**

@@ -355,4 +355,74 @@ describe('T6 RagService.ask 全场景集成测试', () => {
     const done = events[events.length - 1] as any;
     expect(done.isFallback).toBe(false); // 正常
   });
+
+  // ========== 多轮对话（F1） ==========
+
+  it('F1 多轮对话：history 传入 LLM，messages 含历史消息', async () => {
+    const { kbId, docId } = await createDocAndKb('架构文档');
+    retrieveSpy.mockResolvedValue([mkResult(0.04, docId, 'RAG 架构内容')]);
+    mock.setChatResponse([
+      { type: 'delta', content: '它的版本是 2.0' },
+      { type: 'done' },
+    ]);
+
+    const history = [
+      { role: 'user' as const, content: '什么是 RAG 架构' },
+      { role: 'assistant' as const, content: 'RAG 是检索增强生成[1]' },
+    ];
+    const events = await collectEvents(ragService.ask(kbId, '它的版本是多少', undefined, { history }));
+
+    // 正常回答
+    expect(events[0].type).toBe('references');
+    const done = events[events.length - 1] as any;
+    expect(done.type).toBe('done');
+    expect(done.answer).toContain('2.0');
+
+    // 验证 LLM 收到的 messages 含历史（检查 mock-server 记录的请求 body）
+    const chatReqs = mock.getChatRequests();
+    expect(chatReqs).toHaveLength(1);
+    const messages = chatReqs[0].body.messages;
+    // [system, history user, history assistant, 当前 user] = 4 条
+    expect(messages).toHaveLength(4);
+    expect(messages[0].role).toBe('system');
+    expect(messages[1].role).toBe('user');
+    expect(messages[1].content).toBe('什么是 RAG 架构');
+    expect(messages[2].role).toBe('assistant');
+    expect(messages[2].content).toBe('RAG 是检索增强生成[1]');
+    expect(messages[3].role).toBe('user');
+    expect(messages[3].content).toContain('它的版本是多少');
+  });
+
+  it('F1 多轮对话：空 history 兼容（与无 history 一致）', async () => {
+    const { kbId, docId } = await createDocAndKb('文档');
+    retrieveSpy.mockResolvedValue([mkResult(0.04, docId, '内容')]);
+    mock.setChatResponse([{ type: 'delta', content: '答' }, { type: 'done' }]);
+
+    const events = await collectEvents(ragService.ask(kbId, '问题', undefined, { history: [] }));
+    const chatReqs = mock.getChatRequests();
+    const messages = chatReqs[0].body.messages;
+    // 无历史时 [system, user] = 2 条
+    expect(messages).toHaveLength(2);
+  });
+
+  it('F1 多轮对话：长 history 被截断', async () => {
+    const { kbId, docId } = await createDocAndKb('文档');
+    retrieveSpy.mockResolvedValue([mkResult(0.04, docId, '内容')]);
+    mock.setChatResponse([{ type: 'done' }]);
+
+    // 构造 10 轮 history（20 条），truncateHistory 默认 maxRounds=5
+    const history = [];
+    for (let i = 0; i < 10; i++) {
+      history.push({ role: 'user' as const, content: `Q${i}` });
+      history.push({ role: 'assistant' as const, content: `A${i}` });
+    }
+    await collectEvents(ragService.ask(kbId, '问题', undefined, { history }));
+
+    const chatReqs = mock.getChatRequests();
+    const messages = chatReqs[0].body.messages;
+    // system(1) + 截断后历史(<=11) + 当前 user(1) <= 13
+    expect(messages.length).toBeLessThanOrEqual(13);
+    // 最近的 A9 必须在
+    expect(messages.some((m: any) => m.content === 'A9')).toBe(true);
+  });
 });

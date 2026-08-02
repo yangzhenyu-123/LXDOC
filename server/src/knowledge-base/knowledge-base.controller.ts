@@ -69,9 +69,25 @@ export class KnowledgeBaseController {
     @Param('id', ParseUUIDPipe) id: string,
     @Query('query') query: string,
     @Query('topK') topK?: string,
+    @Query('documentIds') documentIds?: string,
   ) {
-    const config = topK ? { finalTopK: Number(topK) } : undefined;
+    const docFilter = documentIds
+      ? documentIds.split(',').map((s) => s.trim()).filter(Boolean)
+      : undefined;
+    const config = {
+      ...(topK ? { finalTopK: Number(topK) } : {}),
+      ...(docFilter && docFilter.length > 0 ? { documentIds: docFilter } : {}),
+    };
     return this.retrievalService.retrieve(id, query, config);
+  }
+
+  @ApiOperation({ summary: '获取 chunk 完整内容（引用预览）' })
+  @Get(':id/chunks/:chunkId')
+  getChunk(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('chunkId', ParseUUIDPipe) chunkId: string,
+  ) {
+    return this.kbService.getChunk(id, chunkId);
   }
 
   @ApiOperation({ summary: 'RAG 问答（SSE 流式）' })
@@ -93,7 +109,10 @@ export class KnowledgeBaseController {
     res.on('close', () => controller.abort());
 
     try {
-      for await (const event of this.ragService.ask(id, dto.query, controller.signal)) {
+      for await (const event of this.ragService.ask(id, dto.query, controller.signal, {
+        history: dto.history,
+        documentIds: dto.documentIds,
+      })) {
         // SSE 格式：data: {json}\n\n
         res.write(`data: ${JSON.stringify(event)}\n\n`);
         // 检测客户端是否已断开

@@ -6,7 +6,7 @@ import { RetrievalService, RetrievalResult } from './retrieval.service';
 import { LlmService } from '../llm/llm.service';
 import { LlmMessage } from '../llm/llm-provider.interface';
 import { OptionalLlm } from '../llm/optional-llm.decorator';
-import { buildKnowledge, buildPrompt, classifyScore } from './rag.utils';
+import { buildKnowledge, buildPrompt, classifyScore, truncateHistory, HistoryMessage } from './rag.utils';
 
 /**
  * RAG 引用元数据（回传给前端）
@@ -118,26 +118,33 @@ export class RagService {
    * @param kbId 知识库 id
    * @param query 用户问题
    * @param signal 中断信号（用户停止生成时 abort）
-   * @param config 可选配置覆盖
+   * @param options 可选：history（多轮对话历史）+ documentIds（限定检索文档范围）+ config（RAG 配置覆盖）
    * @returns 异步生成器，逐个产出 RagEvent
    */
   async *ask(
     kbId: string,
     query: string,
     signal?: AbortSignal,
-    config?: Partial<RagConfig>,
+    options?: {
+      history?: HistoryMessage[];
+      documentIds?: string[];
+      config?: Partial<RagConfig>;
+    },
   ): AsyncGenerator<RagEvent, void, unknown> {
-    const cfg: RagConfig = { ...DEFAULT_RAG_CONFIG, ...config };
+    const cfg: RagConfig = { ...DEFAULT_RAG_CONFIG, ...options?.config };
     if (!query.trim()) {
       yield { type: 'error', message: '问题不能为空' };
       return;
     }
 
-    // 1. 检索
+    // 1. 检索（documentIds 限定范围，多轮对话时仍按当前 query 检索）
     let chunks: RetrievalResult[];
     try {
       chunks = await this.retrievalService.retrieve(kbId, query, {
         finalTopK: cfg.retrievalTopK,
+        ...(options?.documentIds && options.documentIds.length > 0
+          ? { documentIds: options.documentIds }
+          : {}),
       });
     } catch (err) {
       this.logger.warn(`检索失败：${(err as Error).message}`);
@@ -189,12 +196,14 @@ export class RagService {
     }));
     yield { type: 'references', refs };
 
-    // 5. 组装 prompt（纯函数，从 rag.utils 导入）
+    // 5. 组装 prompt（含历史对话拼接，纯函数从 rag.utils 导入）
     const knowledge = buildKnowledge(chunks, titleMap, cfg);
-    const messages = buildPrompt(query, knowledge);
+    const truncatedHistory = truncateHistory(options?.history ?? []);
+    const messages = buildPrompt(query, knowledge, truncatedHistory);
     this.logger.log(
       `RAG 问答 kb=${kbId.slice(0, 8)} query="${query.slice(0, 30)}" ` +
-      `chunks=${chunks.length} topScore=${topScore.toFixed(4)} fallback=${isFallback}`,
+      `chunks=${chunks.length} topScore=${topScore.toFixed(4)} fallback=${isFallback}` +
+      (truncatedHistory.length > 0 ? ` history=${truncatedHistory.length}` : ''),
     );
 
     // 6. LLM 就绪检查（未启用时显式 error，避免空答案让用户困惑）

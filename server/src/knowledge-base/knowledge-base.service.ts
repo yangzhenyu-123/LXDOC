@@ -250,4 +250,35 @@ export class KnowledgeBaseService {
       embeddedCount: Number(result?.[0]?.cnt ?? 0),
     };
   }
+
+  /**
+   * 获取单个 chunk 的完整内容（引用预览用）
+   *
+   * 安全：校验 chunk 属于指定 kbId，防止跨知识库越权读取。
+   * 不返回 embedding 列（体积大且无业务意义）。
+   */
+  async getChunk(kbId: string, chunkId: string): Promise<{
+    id: string;
+    documentId: string;
+    chunkIndex: number;
+    content: string;
+    headingPath: string | null;
+    parentChunkId: string | null;
+  }> {
+    await this.findOne(kbId); // 校验 KB 存在
+    const chunk = await this.chunkRepo.findOne({
+      where: { id: chunkId, kbId },
+    });
+    if (!chunk) {
+      throw new NotFoundException(`Chunk ${chunkId} 不属于知识库 ${kbId}`);
+    }
+    return {
+      id: chunk.id,
+      documentId: chunk.documentId,
+      chunkIndex: chunk.chunkIndex,
+      content: chunk.content,
+      headingPath: chunk.headingPath,
+      parentChunkId: chunk.parentChunkId,
+    };
+  }
 }

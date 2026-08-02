@@ -99,6 +99,12 @@ export interface UpdateKbPayload {
   retrievalConfig?: Record<string, any>;
 }
 
+/** 历史对话消息（多轮对话用，与后端 HistoryMessageDto 对齐） */
+export interface HistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 // ============ KB CRUD ============
 
 export function listKbs(): Promise<KnowledgeBase[]> {
@@ -152,12 +158,34 @@ export function retrieve(
   kbId: string,
   query: string,
   topK?: number,
+  documentIds?: string[],
 ): Promise<RetrievalResult[]> {
   const params: Record<string, string> = { query };
   if (topK !== undefined) params.topK = String(topK);
+  if (documentIds && documentIds.length > 0) params.documentIds = documentIds.join(',');
   return client.get<RetrievalResult[], RetrievalResult[]>(
     `/knowledge-bases/${kbId}/retrieve`,
     { params },
+  );
+}
+
+/** chunk 完整内容（引用预览弹窗用，与后端 getChunk 返回对齐） */
+export interface ChunkDetail {
+  id: string;
+  documentId: string;
+  chunkIndex: number;
+  content: string;
+  headingPath: string | null;
+  parentChunkId: string | null;
+}
+
+/**
+ * 获取 chunk 完整内容（引用预览）。
+ * 后端会校验 chunk 归属 kbId，防越权。
+ */
+export function getChunk(kbId: string, chunkId: string): Promise<ChunkDetail> {
+  return client.get<ChunkDetail, ChunkDetail>(
+    `/knowledge-bases/${kbId}/chunks/${chunkId}`,
   );
 }
 
@@ -172,11 +200,14 @@ export function retrieve(
  * @param kbId 知识库 id
  * @param query 用户问题
  * @param signal AbortSignal，调用 abort() 中断生成
+ * @param options.history 历史对话（多轮对话用，最近 N 轮由后端截断）
+ * @param options.documentIds 限定检索文档范围（文档选择器用，空则全 KB 检索）
  */
 export async function* askStream(
   kbId: string,
   query: string,
   signal?: AbortSignal,
+  options?: { history?: HistoryMessage[]; documentIds?: string[] },
 ): AsyncGenerator<RagEvent, void, unknown> {
   const token = localStorage.getItem('lxdoc_access_token');
   // baseURL 同 client.ts：/api 由 vite proxy 转发
@@ -186,7 +217,11 @@ export async function* askStream(
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({
+      query,
+      ...(options?.history && options.history.length > 0 ? { history: options.history } : {}),
+      ...(options?.documentIds && options.documentIds.length > 0 ? { documentIds: options.documentIds } : {}),
+    }),
     signal,
   });
 

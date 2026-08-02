@@ -3,8 +3,9 @@
  *
  * 从 RagService 提取的纯逻辑：
  * - buildKnowledge：组装上下文（按 score 降序拼接 chunk，超总字符上限丢弃低分）
- * - buildPrompt：构建 system + user 消息
+ * - buildPrompt：构建 system + user 消息（含历史对话拼接）
  * - classifyScore：阈值三档分类（abstain/degrade/normal）
+ * - truncateHistory：历史对话截断（最近 N 轮 + 总字符上限）
  *
  * 提取目的：让 RAG 核心逻辑可被单元测试直接覆盖，无需 mock LLM/DB。
  * 行为与原 RagService 内联逻辑完全一致。
@@ -12,6 +13,12 @@
 import type { LlmMessage } from '../llm/llm-provider.interface';
 import type { RetrievalResult } from './retrieval.service';
 import type { RagConfig } from './rag.service';
+
+/** 历史对话消息（多轮对话用） */
+export interface HistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 /**
  * 阈值分类结果
@@ -72,13 +79,22 @@ export function buildKnowledge(
  * 构建 prompt 消息
  *
  * system 提示词定义角色、引用规范、拒答指引、prompt 注入防御
- * user 消息注入 knowledge + question
+ * user 消息注入 knowledge + 历史对话（如有）+ 当前问题
  *
- * @param query 用户问题
+ * 历史对话插在 system（参考资料 + 规范）和当前问题之间，
+ * 让 LLM 理解追问上下文（如"它的版本是多少"中的"它"指代）。
+ * 历史消息中 assistant 的引用标注 [1][2] 保留（不影响理解，且让 LLM 知道引用过哪些资料）。
+ *
+ * @param query 当前问题
  * @param knowledge 拼接后的参考资料文本
- * @returns [system, user] 消息数组
+ * @param history 历史对话（可选，多轮对话用，已由 truncateHistory 截断）
+ * @returns [system, ...history, user(含 knowledge+当前问题)] 消息数组
  */
-export function buildPrompt(query: string, knowledge: string): LlmMessage[] {
+export function buildPrompt(
+  query: string,
+  knowledge: string,
+  history: HistoryMessage[] = [],
+): LlmMessage[] {
   const systemPrompt = `你是 LXDOC 企业知识库助手。请根据下方参考资料回答用户问题。
 
 回答要求：
@@ -97,8 +113,53 @@ ${knowledge}
 用户问题：
 ${query}`;
 
-  return [
+  const messages: LlmMessage[] = [
     { role: 'system', content: systemPrompt },
-    { role: 'user', content: userPrompt },
   ];
+  // 历史对话按时间顺序插入（user/assistant 交替）
+  for (const h of history) {
+    messages.push({ role: h.role, content: h.content });
+  }
+  // 当前问题（含参考资料）作为最后一条 user 消息
+  messages.push({ role: 'user', content: userPrompt });
+  return messages;
+}
+
+/**
+ * 截断历史对话（避免 prompt 过长）
+ *
+ * 策略：
+ * 1. 从末尾向前取，最多 maxRounds 轮（1 轮 = 1 user + 1 assistant）
+ * 2. 累计字符不超过 maxChars，超出则停止
+ * 3. 保持 user/assistant 配对完整（不截断到一半）
+ *
+ * @param history 完整历史（按时间顺序）
+ * @param maxRounds 最多保留轮数（默认 5）
+ * @param maxChars 最多保留字符数（默认 4000）
+ * @returns 截断后的历史（按时间顺序，最近 maxRounds 轮）
+ */
+export function truncateHistory(
+  history: HistoryMessage[],
+  maxRounds = 5,
+  maxChars = 4000,
+): HistoryMessage[] {
+  if (history.length === 0) return [];
+  // 从末尾向前取，保证最近的对话
+  const reversed: HistoryMessage[] = [];
+  let totalChars = 0;
+  let rounds = 0;
+  let lastRole: string | null = null;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const h = history[i];
+    // 角色变化计一轮（user→assistant 或 assistant→user）
+    if (lastRole !== null && h.role !== lastRole) {
+      rounds++;
+      if (rounds >= maxRounds) break;
+    }
+    if (totalChars + h.content.length > maxChars) break;
+    reversed.unshift(h);
+    totalChars += h.content.length;
+    lastRole = h.role;
+  }
+  return reversed;
 }

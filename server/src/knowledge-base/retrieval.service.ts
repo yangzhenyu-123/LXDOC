@@ -39,6 +39,8 @@ export interface RetrievalConfig {
   rrfK: number;
   /** 最终返回数 */
   finalTopK: number;
+  /** 限定检索文档范围（空则全 KB 检索，文档选择器用） */
+  documentIds?: string[];
 }
 
 export const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
@@ -72,7 +74,7 @@ export class RetrievalService {
    * 混合检索
    * @param kbId 知识库 id
    * @param query 用户查询文本
-   * @param config 检索配置，省略用默认
+   * @param config 检索配置，省略用默认。documentIds 限定检索文档范围
    */
   async retrieve(
     kbId: string,
@@ -82,13 +84,16 @@ export class RetrievalService {
     const cfg: RetrievalConfig = { ...DEFAULT_RETRIEVAL_CONFIG, ...config };
     if (!query.trim()) return [];
 
+    // documentIds 过滤条件（空则不过滤，全 KB 检索）
+    const docFilter = cfg.documentIds && cfg.documentIds.length > 0 ? cfg.documentIds : null;
+
     // 1. 向量召回（若 TEI 可用）
     let vectorHits: VectorHit[] = [];
     if (this.embeddingService.isReady()) {
       try {
         const queryVec = await this.embeddingService.embed(query);
         if (queryVec && queryVec.length > 0) {
-          vectorHits = await this.vectorSearch(kbId, queryVec, cfg.vectorTopK);
+          vectorHits = await this.vectorSearch(kbId, queryVec, cfg.vectorTopK, docFilter);
         } else {
           this.logger.warn(`query embedding 返回空，跳过向量召回`);
         }
@@ -100,7 +105,7 @@ export class RetrievalService {
     }
 
     // 2. 词法召回
-    const trgmHits = await this.trgmSearch(kbId, query, cfg.trgmTopK);
+    const trgmHits = await this.trgmSearch(kbId, query, cfg.trgmTopK, docFilter);
 
     // 3. RRF 融合（纯函数，从 retrieval.utils 导入）
     const fused = rrfFuse(vectorHits, trgmHits, cfg.rrfK);
@@ -120,28 +125,35 @@ export class RetrievalService {
 
     this.logger.log(
       `检索 kb=${kbId.slice(0, 8)} query="${query.slice(0, 30)}" ` +
-      `向量=${vectorHits.length} 词法=${trgmHits.length} 融合=${results.length}`,
+      `向量=${vectorHits.length} 词法=${trgmHits.length} 融合=${results.length}` +
+      (docFilter ? ` docs=${docFilter.length}` : ''),
     );
     return results;
   }
 
   /**
    * 向量召回：pgvector cosine 距离排序
+   * @param docFilter 限定文档范围（null 则不过滤）
    */
   private async vectorSearch(
     kbId: string,
     queryVec: number[],
     topK: number,
+    docFilter: string[] | null = null,
   ): Promise<VectorHit[]> {
     const vecLiteral = `[${queryVec.join(',')}]`;
+    // 动态拼接 SQL：docFilter 非空时加 document_id 过滤
+    const docClause = docFilter ? `AND document_id = ANY($4::uuid[])` : '';
+    const params: unknown[] = [vecLiteral, kbId, topK];
+    if (docFilter) params.push(docFilter);
     const rows = await this.entityManager.query(
       `SELECT id, content, document_id, heading_path, chunk_type, metadata,
               1 - (embedding <=> $1::vector) AS similarity
        FROM kb_chunks
-       WHERE kb_id = $2 AND embedding IS NOT NULL
+       WHERE kb_id = $2 AND embedding IS NOT NULL ${docClause}
        ORDER BY embedding <=> $1::vector
        LIMIT $3`,
-      [vecLiteral, kbId, topK],
+      params,
     );
     return (rows ?? []).map((r: any, i: number) => ({
       chunkId: r.id,
@@ -159,23 +171,30 @@ export class RetrievalService {
    * 词法召回：pg_trgm similarity 排序
    * 不用 % 操作符（受 similarity_threshold 阈值限制），改用 similarity() 函数 + 硬编码阈值过滤，
    * 避免修改 session 级参数。
+   * @param docFilter 限定文档范围（null 则不过滤）
    */
   private async trgmSearch(
     kbId: string,
     query: string,
     topK: number,
+    docFilter: string[] | null = null,
   ): Promise<TrgmHit[]> {
     // 转义 ILIKE 通配符
     const escaped = query.replace(/[%_\\]/g, '\\$&');
+    // 动态拼接 SQL：docFilter 非空时加 document_id 过滤
+    const docClause = docFilter ? `AND document_id = ANY($4::uuid[])` : '';
+    const params: unknown[] = [escaped, kbId, topK];
+    if (docFilter) params.push(docFilter);
     const rows = await this.entityManager.query(
       `SELECT id, content, document_id, heading_path, chunk_type, metadata,
               similarity(content, $1) AS sim
        FROM kb_chunks
        WHERE kb_id = $2
          AND similarity(content, $1) > 0.05
+         ${docClause}
        ORDER BY sim DESC
        LIMIT $3`,
-      [escaped, kbId, topK],
+      params,
     );
     return (rows ?? []).map((r: any, i: number) => ({
       chunkId: r.id,
@@ -185,7 +204,7 @@ export class RetrievalService {
       chunkType: r.chunk_type,
       metadata: r.metadata ?? {},
       rank: i + 1,
-      similarity: r.similarity,
+      similarity: r.sim,
     }));
   }
 }
