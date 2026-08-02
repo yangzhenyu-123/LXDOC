@@ -1,9 +1,8 @@
 # 依赖目录
 node_modules/
 
-# pnpm 11 会自动生成 pnpm-workspace.yaml 记录 allowBuilds 配置，
-# 但本项目非 monorepo，该文件会导致容器内 pnpm 9 误判为 workspace 报错，故忽略
-pnpm-workspace.yaml
+# pnpm-workspace.yaml 需入库：Docker 构建依赖其中的 allowBuilds 白名单
+# （pnpm 11 默认阻止依赖执行 install 脚本，须在 install 前提供此配置）
 
 # 上传文件目录（容器挂载用，不入库）
 uploads/original/

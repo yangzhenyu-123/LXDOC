@@ -60,6 +60,9 @@ services:
       JWT_REFRESH_EXPIRES: ${JWT_REFRESH_EXPIRES:-7d}
       ALLOW_SIGNUP: ${ALLOW_SIGNUP:-false}
       FILE_TOKEN_EXPIRES: ${FILE_TOKEN_EXPIRES:-10m}
+      # 初始管理员（首次启动 users 表为空时 seed；生产环境必须设置 ADMIN_PASSWORD）
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@lxdoc.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?必须在 .env 中设置 ADMIN_PASSWORD}
       # OnlyOffice 集成
       ONLYOFFICE_ENABLED: ${ONLYOFFICE_ENABLED:-true}
       ONLYOFFICE_URL: http://onlyoffice
@@ -116,6 +119,10 @@ services:
     volumes:
       # 上传文件目录挂载到宿主机，便于持久化与查看
       - ./uploads:/app/uploads
+    # 内网 DNS 透明：宿主机 /etc/hosts 中静态解析的内网域名注入容器
+    # 否则容器内 Docker DNS（127.0.0.11）无法解析 <LLM_HOST> 等内网服务
+    extra_hosts:
+      - "<LLM_HOST>:${LLM_ENDPOINT_IP:-<LLM_ENDPOINT_IP>}"
     # 生产环境经 nginx 反代，不直接暴露
     # ports:
     #   - "3000:3000"

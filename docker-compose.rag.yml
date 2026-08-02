@@ -17,6 +17,11 @@
 #
 # 首次启动会下载约 2GB 模型，start_period 给 180s；模型缓存在 volume 避免重复下载
 # rerank 为可选：不设 LLM_RERANK_BASE_URL 时 RetrievalService 自动跳过 rerank 回退纯 RRF
+#
+# 离线环境（无 huggingface.co 外网）注意事项：
+# - 模型需预先放入命名卷（docker run --rm -v <卷名>:/data -v <宿主机模型路径>:/src alpine cp -a /src/. /data/）
+# - tei-rerank 若模型未就绪会启动失败，但因 backend 不硬依赖它，不影响主服务
+# - 不需要 rerank 时，在 .env 设 LLM_RERANK_BASE_URL= 留空，backend 自动跳过
 
 services:
   # TEI embedding 服务（BAAI/bge-m3，1024 维，CPU 版）
@@ -24,28 +29,24 @@ services:
   tei-embed:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.5
     container_name: lxdoc-tei-embed
-    # bge-m3 模型较大，首次拉取慢；--model-id 指定模型，--max-batch-tokens 8192 适配长文档 chunk
-    command: --model-id ${LLM_EMBED_MODEL:-BAAI/bge-m3} --max-batch-tokens 8192
+    # bge-m3 模型加载峰值 RSS 约 33GB（192 个 tokenization worker 各持副本）；限制 workers+内存防 OOM
+    command: --model-id ${LLM_EMBED_MODEL:-BAAI/bge-m3} --max-batch-tokens 8192 --max-concurrent-requests 64 --tokenization-workers 16
     volumes:
       - tei-embed-models:/data
     expose:
       - "80"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      # 首次启动需下载 ~2GB 模型，给 180s 启动窗口
-      start_period: 180s
+    # TEI cpu-1.5 镜像无 curl/wget/python3，dash 不支持 /dev/tcp，无法做 HTTP 健康检查
+    # 不设 healthcheck，靠 backend 的 embedding 重试机制兜底（模型已缓存时加载约 8s）
     restart: unless-stopped
-    # bge-m3 CPU 推理吃内存，限制 4g/2cpu；生产机资源充足可调高
-    mem_limit: 4g
-    cpus: 2
+    # bge-m3 模型加载峰值 RSS 约 17GB（ONNX 568M 参数），限制 32g 防 OOM；生产机 1TB 内存充足
+    mem_limit: 32g
+    cpus: 8
     networks:
       - default
 
   # TEI rerank 服务（BAAI/bge-reranker-v2-m3，cross-encoder 二次精排，CPU 版）
   # 可选：提升检索相关性；未配置 LLM_RERANK_BASE_URL 时 backend 自动跳过
+  # 离线环境需预先将 rerank 模型放入 tei-rerank-models 卷，否则容器会因拉模型失败而退出
   tei-rerank:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.5
     container_name: lxdoc-tei-rerank
@@ -54,12 +55,6 @@ services:
       - tei-rerank-models:/data
     expose:
       - "80"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 120s
     restart: unless-stopped
     mem_limit: 2g
     cpus: 2
@@ -71,13 +66,14 @@ services:
     environment:
       # embedding 端点默认指向 compose 内 tei-embed（覆盖 docker-compose.yml 的空默认值）
       LLM_EMBED_BASE_URL: ${LLM_EMBED_BASE_URL:-http://tei-embed:80}
-      # rerank 端点：默认指向 compose 内 tei-rerank；用户在 .env 留空则禁用 rerank
-      LLM_RERANK_BASE_URL: ${LLM_RERANK_BASE_URL:-http://tei-rerank:80}
+      # rerank 端点：默认留空（禁用 rerank）；用户在 .env 设 http://tei-rerank:80 启用
+      # 留空时 backend 跳过 rerank 回退纯 RRF；需确保 tei-rerank 容器有模型再启用
+      LLM_RERANK_BASE_URL: ${LLM_RERANK_BASE_URL:-}
     depends_on:
+      # embedding 软依赖：service_started 不等 healthcheck（TEI 无健康检查工具）
+      # 模型已缓存时 TEI 加载约 8s，backend 启动期间 NestJS 初始化，首次 embedding 请求时 TEI 大概率 ready
+      # 未 ready 时 backend 的 embed 重试机制（maxRetries=2）兜底
       tei-embed:
-        condition: service_healthy
-      # rerank 软依赖：未就绪不阻断 backend 启动，RAG 自动回退纯 RRF
-      tei-rerank:
         condition: service_started
 
 volumes:

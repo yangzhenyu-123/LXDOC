@@ -1,10 +1,11 @@
-# LXDOC 后端镜像：基于 node:20-bookworm-slim
+# LXDOC 后端镜像：基于 node:22-bookworm-slim
+# Node 22 + pnpm 11.6 与开发环境一致（pnpm 11 需 Node 22+，且 pnpm-workspace.yaml 用了 11+ 的 allowBuilds 字段）
 # 系统依赖：
 # - pandoc：docx/odt → markdown/html 抽取，PDF 转 markdown 中间步骤
 # - pdf2htmlEX：PDF → 版式保真 HTML（仅 Debian sid/unstable 可装；stable 用源码或换镜像）
 # - libreoffice（soffice）：PDF → docx 转换，用于 PDF 转可编辑
 # - poppler-utils：PDF 元信息辅助工具
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 
 # 安装系统依赖
 # 注：pdf2htmlEX 在 Debian stable 仓库不可用，需自行构建或换用第三方镜像
@@ -21,12 +22,14 @@ RUN apt-get update \
 WORKDIR /app
 
 # 固定 pnpm 版本（通过 corepack），保证构建可复现
+# 注意：须与开发机 pnpm 版本一致，避免 pnpm-workspace.yaml 新字段（如 allowBuilds）兼容性问题
 ENV PNPM_HOME=/usr/local/share/pnpm
-ENV PNPM_VERSION=9.12.0
+ENV PNPM_VERSION=11.6.0
 RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 
-# 先拷贝依赖清单，利用 Docker 层缓存
-COPY package.json pnpm-lock.yaml* ./
+# 先拷贝依赖清单 + pnpm-workspace.yaml（含 allowBuilds 构建白名单），利用 Docker 层缓存
+# 注意：pnpm 11 默认阻止依赖执行 install 脚本，须在 install 前提供 pnpm-workspace.yaml 的 allowBuilds 配置
+COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml* ./
 
 # 安装依赖（含 devDependencies，构建期需要 nest/cli）
 RUN pnpm install --prod=false --frozen-lockfile || pnpm install --prod=false

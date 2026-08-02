@@ -1,0 +1,8 @@
+# pnpm 11+ 构建脚本白名单（仅允许以下依赖执行 install 脚本，避免任意包运行未审核脚本）
+# @nestjs/core：含 postinstall 检测命令；cpu-features/ssh2：原生 addon 编译；protobufjs：cli 链接；unrs-resolver：原生 binding
+allowBuilds:
+  '@nestjs/core': true
+  cpu-features: true
+  protobufjs: true
+  ssh2: true
+  unrs-resolver: true
