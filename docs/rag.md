@@ -313,6 +313,82 @@ knowledge 拼接格式（每个 chunk 一个块）：
 - 文档评分（LLM structured output grade_documents）
 - 流式敏感词过滤
 
+## P5 前端集成
+
+### 前端架构
+
+- 框架：Vue 3 `<script setup lang="ts">` + Element Plus + Pinia
+- 样式：`--lx-*` 设计令牌（Indigo 主色 + Slate 中性色）
+- markdown：marked + DOMPurify（sanitizeMarkedHtml 防 XSS）
+
+### 文件清单
+
+| 文件 | 说明 |
+|------|------|
+| `web/src/api/kb.ts` | KB API：类型 + CRUD + retrieve + askStream（SSE 解析） |
+| `web/src/views/KbAskView.vue` | 问答页（核心）：SSE 消费 + 引用 + 思考链 + 状态 UI |
+| `web/src/views/KbListView.vue` | 知识库列表 + admin CRUD + 文档管理抽屉 |
+| `web/src/router/index.ts` | 新增 `/kb` + `/kb/:id` 路由 |
+| `web/src/App.vue` | 知识库分区加 RAG 入口列表 |
+
+### SSE 客户端实现
+
+axios 不支持流式，用 fetch + ReadableStream：
+
+```typescript
+export async function* askStream(kbId, query, signal?): AsyncGenerator<RagEvent> {
+  const resp = await fetch(`/api/knowledge-bases/${kbId}/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json',
+               Authorization: `Bearer ${localStorage.getItem('lxdoc_access_token')}` },
+    body: JSON.stringify({ query }),
+    signal,
+  });
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split('\n\n');
+    buffer = events.pop() ?? '';
+    for (const evt of events) {
+      const parsed = parseSseEvent(evt);
+      if (parsed) yield parsed;
+    }
+  }
+}
+```
+
+### 引用上标渲染
+
+LLM 输出的 `[1][2]` 转为可点击 `<sup>`：
+
+1. markdown 渲染前用占位符替换 `[N]` 防被解析
+2. marked 渲染 + sanitizeMarkedHtml 净化
+3. 占位符替换为 `<sup class="rag-ref-tag" data-ref="N" data-msg="idx">[N]</sup>`
+4. 点击事件委托：滚动到引用列表对应项 + 高亮 1.5s
+
+### 状态 UI
+
+| 场景 | 触发条件 | UI 表现 |
+|------|---------|---------|
+| 正常回答 | `done.isFallback=false` | 绿色引用列表 + 正文 |
+| 降级回答 | `done.isFallback=true` | 橙色 warning alert + 左边框 |
+| 拒答 | 无 references，单 done | "未在知识库中找到相关资料" |
+| 错误 | `error` 事件 | 红色 error alert |
+| 中断 | AbortController.abort | "已停止" 标注 + 已收内容保留 |
+| 流式中 | reasoning/delta 持续 | 思考链展开 + 光标动画 |
+
+### P5 不实现（留 P6+）
+
+- 文档选择器（当前通过 UUID 加入，后续接文档树选择）
+- 多轮对话（前端会话历史 + 后端 query 改写）
+- 引用片段预览弹窗（hover tooltip）
+- 降级前缀前端展示（当前依赖后端 delta 下发）
+- KB 计数器修复（documentCount=4 实际 1，P2 留下的 bug）
+
 ## API 参考
 
 ### 知识库管理
