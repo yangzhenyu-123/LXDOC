@@ -14,6 +14,7 @@ import { RagService } from './rag.service';
 import { RagPromptService } from './rag-prompt.service';
 import { FeedbackService } from './feedback.service';
 import { LlmModule } from '../llm/llm.module';
+import { AuditModule } from '../audit/audit.module';
 
 /**
  * 知识库模块（RAG 向量检索 + 问答）
@@ -29,6 +30,7 @@ import { LlmModule } from '../llm/llm.module';
   imports: [
     TypeOrmModule.forFeature([KnowledgeBase, KbChunk, MessageFeedback, Document]),
     LlmModule,
+    AuditModule,
   ],
   controllers: [KnowledgeBaseController],
   providers: [

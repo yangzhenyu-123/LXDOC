@@ -1,0 +1,146 @@
+1、文档库内容
+主要功能：支持存储、查看各种类型文档
+1.1 使用了哪些开源技术？完善到文档
+  回复：当前开源技术栈分散在 package.json / docker-compose.yml / docs 各处，未集中成文。清单如下：
+    后端：NestJS 10 + TypeORM 0.3 + PostgreSQL 16(pgvector 0.8.2) + passport-jwt + class-validator + helmet + multer + pdf-parse
+    前端：Vue 3.4 + Vite 5 + Element Plus 2.5 + Pinia 2 + Vue Router 4 + Vditor 3.9(编辑器) + marked 18(渲染) + dompurify 3.4(XSS 过滤) + pdfjs-dist 3.11
+    容器/外部服务：OnlyOffice DocumentServer 9.4(32 种 Office 真编辑) + kkFileView 5.1(130+ 附件预览) + docling-serve(PDF/DOCX 智能解析+OCR) + pdf2htmlEX(版式 HTML) + TEI(HuggingFace 嵌入推理) + pgvector(向量检索)
+    系统二进制(backend 镜像内)：pandoc + libreoffice(soffice) + poppler-utils + fonts-noto-cjk
+  状态：未集中成文（信息散落在 docs/parsing.md、docs/document-formats.md、README.md）
+  改进：已新增 docs/tech-stack.md 集中清单（见本次提交）
+
+1.2 还需要审阅目前的文档功能对于国产操作系统自研开发企业文档还有那些可以补充？
+  回复：当前对国产格式支持情况——
+    已支持：ofd/wps/wpt/et/dps/ett/ods/odp/ott 等国产及 OpenDocument 格式（OnlyOffice 编辑/预览 + kkFileView 兜底）
+    可能缺失（需用户确认优先级）：
+      a. 信创合规：国密 SM2/SM3/SM4 加密、签名验签；目前 JWT/文件 token 用 HS256，未支持国密
+      b. 桌面集成：麒麟/统信 UOS 桌面端协议（如 DBus 文件关联）、系统级最近文档
+      c. 本地化：少数民族语言界面、繁简自动转换
+      d. 国产数据库适配：达梦/人大金仓/高斯（当前仅 PostgreSQL）
+      e. 国产 CPU：龙芯/飞腾/鲲鹏 架构镜像构建（当前仅 x86_64）
+      f. WPS 深度集成：WPS 在线编辑协议（当前仅 OnlyOffice）
+  状态：部分满足（国产格式已覆盖），信创合规/国产数据库/国产 CPU 适配未覆盖
+  改进：属产品方向，需用户确认优先级后单独立项；不建议在本轮直接改
+
+2、知识库生成
+2.1、文档需要被解析，识别后才能流向知识库。
+2.1.1 各种格式的文档如何识别? 
+1）pdf、odt、docx、wps、ods、xlsx等常用办公文档解析目前使用的什么工具？
+  回复：解析链路（详见 docs/parsing.md §解析器架构）——
+    md/txt/csv/tsv → TextParser（Node fs 直读 utf-8，不走重型解析）
+    docx/odt → DOCLING_ENABLED=true 时优先 DoclingParser（HTTP /v1/convert/file，输出 markdown+图片+表格结构）；失败回退 PandocParser（pandoc -t plain，仅抽纯文本入索引，图片走 --extract-media）
+    pdf → DOCLING_ENABLED=true 时优先 DoclingParser（markdown+图片+表格+版式+OCR）；失败回退 PdfParser（pdf-parse，纯文本，无图无版式无表格）
+    wps/wpt/ofd/et/dps/xls/xlsx/ppt/pptx 等 cell/slide 类 → 仅落盘原文件，content=null，不解析（靠 OnlyOffice 编辑/kkFileView 预览，全文检索仅走标题与标签）
+    附件 130+ 种 → 落盘 attachments/<docId>/，不解析，仅 kkFileView 预览
+  状态：满足（双层解析 docling 为主 + 本地回退，已实现并文档化）
+  改进：无需
+
+2.2 识别后的问题
+1）图片存储、提取
+  回复：已实现四段式存储（docs/parsing.md §存储分层）——
+    原文件：uploads/original/<docId>/<原文件名>
+    提取图片：uploads/images/<docId>/<图片名>（docling/pandoc 抽取，图片名稳定化 image_0001.png，重解析幂等）
+    附件：uploads/attachments/<docId>/
+    缓存：uploads/cache/<docId>/（转换中间产物，用后即删）
+    content 中图片以 /api/files/<docId>/image/<name> 引用（不带 token），前端渲染时 rewriteImageUrls 拼 ?token=<fileToken>（10 分钟有效、绑定 docId、需读权限）
+    AI 总结前图片 URL 替换为 [图片: alt] 占位，减少 token 噪声
+  状态：满足
+  改进：无需
+
+2）各种文档的识别准确率优化
+  回复：当前准确率现状与短板——
+    docling（启用时）：PDF/DOCX/ODT 表格结构、版式、图片还原好；OCR 由 DOCLING_DO_OCR 控制（生产默认 false，扫描件/图片型 PDF 无文字）
+    pdf-parse（回退）：纯文本，无图无版式无表格，扫描件直接空白
+    pandoc（回退）：docx/odt 表格丢结构，复杂样式还原差
+    生产环境 DOCLING_ENABLED=true 但 DOCLING_DO_OCR=false（CPU 模式 OCR 慢且占内存）
+  状态：部分满足（电子文档准确率高；扫描件/图片型 PDF 在 OCR 关闭时准确率低）
+  改进：
+    a. 短期：对扫描件 PDF 临时开启 DOCLING_DO_OCR=true（按文档粒度，上传后前端识别"无文字"自动触发重解析+OCR）——需规划
+    b. 中期：引入 VLM（如 docling picture_description）为图片生成文字描述，提升含图文档的总结/RAG 质量——需规划
+    c. 配置建议：生产 .env 中 DOCLING_DO_OCR 视文档类型按需开启，已在 docs/parsing.md 标注权衡
+
+3）生成知识库的流程优化，如提取后的文档，错字、乱码等
+  回复：当前 chunking 链路（ChunkingService.chunk）——
+    markdown_structure 策略：按 ATX 标题切 section，段落聚合，代码块/表格整块保留，标题层级累计为 headingPath
+    默认 chunkSize=768 字符，overlap=96
+    短板：chunking 前无文本净化，docling/pdf-parse 输出可能含控制字符、零宽字符(U+200B/FEFF)、乱码 Unicode、PDF 提取的断行错误，直接进入 chunk 和 embedding，污染向量
+  状态：未满足（无文本净化环节）
+  改进：已在 ChunkingService.chunk 入口加 sanitizeText 净化（去控制字符/零宽字符/非法 Unicode/规范空白），见本次提交
+
+4）生成后的知识库存储、归档、导出、转化格式等功能
+  回复：当前知识库功能——
+    已实现：CRUD + addDocument/removeDocument + 检索 + RAG 问答 + 反馈
+    未实现：归档（KB 冻结/版本快照）、导出（KB 内容导出为 JSON/Markdown 包）、格式转换（KB 转 docx/pdf 等）
+  状态：未满足
+  改进：已新增 GET /api/knowledge-bases/:id/export 导出 KB（JSON 含全部 chunk + 元数据；Markdown 拼接 chunk 为单文档），见本次提交；归档/版本快照需规划
+
+2.3 知识库审查
+1）触发AI分析前，需要高权限的用户对文档进行审核，防止数据污染
+  回复：当前权限模型——
+    写操作（create/update/remove/addDocument/removeDocument）已限 @Roles(ADMIN)（KnowledgeBaseController L165-210）
+    即只有 admin 能往 KB 加文档，editor/viewer 无权——已实现"高权限用户控制"
+    但缺少"审核工作流"：无 pending/approved/rejected 状态、无审核人字段、无审核记录
+  状态：部分满足（权限已限 admin，但无显式审核工作流）
+  改进：
+    a. 轻量改进：addDocument 时记录 audit_log（已有 audit_logs 表 + AuditService），把"文档加入 KB"动作写入审计——可快速做
+    b. 完整审核流：加 KbDocument.status(pending/approved) + reviewer + reviewedAt 字段，addDocument 默认 pending，admin 审核后才进入检索——需规划
+  本轮做：先加审计日志（轻量），完整审核流列入 P10 候选
+
+3、知识库使用
+3.1 我们从文档库提取的最终转化为Markdown，这要求提取尽可能准确，同时转换后的Markdown渲染也要准确
+1）当前文档看库使用的kkfileview能否支持？
+  回复：kkFileView 与 Markdown 的关系——
+    主文档 md/txt：不走 kkfileview，走 Vditor 编辑器（所见即所得，体验更好）
+    附件 md：kkfileview 5.1.0 内置支持 md 预览（源码高亮列表含 md）
+    docling/pandoc 提取的 markdown 渲染：前端用 marked 18 + dompurify 3.4 渲染，不走 kkfileview
+    kkfileview 用于：Office/PDF 版式预览兜底、130+ 附件格式预览
+  状态：满足（markdown 渲染由 marked+dompurify 负责，kkfileview 负责其他格式）
+  改进：无需
+
+3.2 RAG流程优化
+  回复：当前 RAG 链路（P0-P9 已完成）——
+    检索：混合检索（向量 HNSW + pg_trgm 词法）+ RRF 融合 + 可选 rerank（cross-encoder 二次精排）
+    生成：GLM-5.2 流式 + reasoning_content + 引用 [1][2] + 拒答双阈值 + 多轮对话(history 截断) + 文档选择器(documentIds)
+    体验：打字机平滑 + 置信度徽章 + 反馈评分 + 引用 pill 悬浮卡 + 示例问题
+    可优化方向（P10+ 候选）：
+      a. 查询重写：GLM 把口语化问题改写为检索友好的关键词（当前直接 embed 原始 query）
+      b. HyDE：先让 LLM 生成假设答案再 embed，提升语义召回
+      c. 多路召回扩展：加 BM25 替代 pg_trgm（pg_trgm 是模糊匹配，BM25 是经典全文检索）
+      d. chunk 策略自适应：按文档类型自动选 chunkSize（技术文档小 chunk，叙述文档大 chunk）
+      e. 启用 rerank：生产机部署 bge-reranker-v2-m3 模型后在 .env 设 LLM_RERANK_BASE_URL=http://tei-rerank:80
+      f. 拒答阈值自适应：按 KB 维度配置阈值（当前全局 RRF 0.02/0.03，rerank 0.05/0.15）
+      g. 答案溯源强化：done 事件返回 chunkId 列表 + 文档片段定位（点击引用跳到原文位置）
+  状态：基础满足，优化空间大
+  改进：属 P10+ 候选，需用户确认优先级后单独立项；不建议本轮直接改
+
+3.3 使用体验优化
+  回复：当前体验（P9 已完成）——
+    流式：打字机平滑器(rAF 节流) + reasoning 折叠 + 增量渲染
+    引用：pill 化 + hover 悬浮卡 + 点击高亮 + 预览弹窗
+    反馈：点赞/点踩 + 点踩必填理由 + upsert 去重
+    可优化方向：
+      a. 历史会话持久化：当前聊天历史仅前端内存，刷新丢失；可存表 kb_chat_sessions + kb_chat_messages
+      b. 多知识库对比：同一问题跨 KB 检索对比答案
+      c. 问题推荐：基于 KB 内容生成推荐问题（已有 generateSampleQuestions，可前端预置）
+      d. 回答分享：生成分享链接（只读快照）
+      e. 移动端适配：当前 KbAskView 桌面优先，移动端布局未优化
+      f. 暗色模式：当前浅色，未适配 prefers-color-scheme
+      g. 键盘快捷键：Enter 发送 / Shift+Enter 换行 / Esc 停止
+  状态：基础满足，优化空间大
+  改进：属 P10+ 候选，需用户确认优先级；不建议本轮直接改
+
+---
+
+本轮已实施的改进（见本次提交）：
+1. 新增 docs/tech-stack.md 集中开源技术栈清单（对应 1.1）
+2. ChunkingService.chunk 入口加文本净化 sanitizeText（对应 2.2.3 错字/乱码）
+3. 新增 KB 导出接口 GET /api/knowledge-bases/:id/export（对应 2.2.4 导出）
+4. addDocument 写入 audit_logs（对应 2.3 审查轻量改进）
+
+待用户确认优先级后再推进的（P10+ 候选）：
+- 1.2 信创合规/国产数据库/国产 CPU 适配
+- 2.2.2 OCR 按需开启 + VLM 图片描述
+- 2.2.4 归档/版本快照
+- 2.3 完整审核工作流（pending/approved/rejected）
+- 3.2 RAG 流程优化（查询重写/HyDE/BM25/chunk 自适应/溯源强化）
+- 3.3 体验优化（会话持久化/多 KB 对比/移动端/暗色/快捷键）

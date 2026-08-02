@@ -35,6 +35,48 @@ export const DEFAULT_CHUNK_STRATEGY: ChunkStrategy = {
 };
 
 /**
+ * 文本净化：chunking 前去除会污染向量的字符
+ *
+ * 处理内容：
+ * 1. BOM（U+FEFF）
+ * 2. 零宽字符（U+200B/200C/200D/2060/FEFF）——文档编辑器/转换工具常见副产物
+ * 3. 控制字符 U+0000-U+001F（保留 \n \t \r）——PDF 抽取常混入
+ * 4. 全角空格 U+3000 → 半角空格
+ * 5. 连续空白压缩为单个空格（保留换行）
+ * 6. 行尾空白
+ * 7. Windows 换行 CRLF → LF
+ *
+ * 不做：
+ * - 错别字修正（需 LLM，留 P10+）
+ * - hyphenation 断词修复（"inter-\nnational"→"international"，误伤风险高）
+ * - 删除合法 Unicode（CJK/emoji 等保留）
+ *
+ * 对应 TODO 2.2.3：提取后文档错字/乱码净化的最小可行版本
+ */
+export function sanitizeText(text: string): string {
+  if (!text) return text;
+  return text
+    // 1. BOM
+    .replace(/\uFEFF/g, '')
+    // 2. 零宽字符（零宽空格/连接符/非连接符/不间断分隔符）
+    .replace(/[\u200B\u200C\u200D\u2060]/g, '')
+    // 3. 控制字符，保留 \n(0A) \t(09) \r(0D)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+    // 4. 全角空格 → 半角
+    .replace(/\u3000/g, ' ')
+    // 7. CRLF → LF（在压缩空白前先统一换行）
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    // 5. 连续空格/制表符压缩为单个空格（不影响换行）
+    .replace(/[^\S\n]+/g, ' ')
+    // 6. 行尾空白
+    .split('\n')
+    .map((line) => line.replace(/\s+$/, ''))
+    .join('\n')
+    .trim();
+}
+
+/**
  * Markdown chunk 切分服务
  *
  * 策略：markdown_structure（默认）
@@ -59,9 +101,11 @@ export class ChunkingService {
    */
   chunk(markdown: string, strategy?: Partial<ChunkStrategy>): ChunkResult[] {
     const cfg: ChunkStrategy = { ...DEFAULT_CHUNK_STRATEGY, ...strategy };
-    if (!markdown || !markdown.trim()) return [];
+    // 净化：去 BOM/零宽字符/控制字符/全角空格，压缩空白（防止污染 embedding 向量）
+    const clean = markdown ? sanitizeText(markdown) : '';
+    if (!clean || !clean.trim()) return [];
 
-    const lines = markdown.split('\n');
+    const lines = clean.split('\n');
     const chunks: ChunkResult[] = [];
     let headingStack: string[] = []; // 标题层级栈
     let currentSection: string[] = []; // 当前 section 累积行

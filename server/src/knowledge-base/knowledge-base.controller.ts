@@ -22,12 +22,15 @@ import { RagService } from './rag.service';
 import { FeedbackService } from './feedback.service';
 import { CreateKbDto, UpdateKbDto, AddDocumentDto, RetrieveDto, AskDto } from './dto/kb.dto';
 import { CreateFeedbackDto } from './dto/feedback.dto';
+import { AuditService } from '../audit/audit.service';
+import { AuditAction } from '../audit/audit-log.entity';
 
 /**
  * 知识库管理 API
  *
  * 读操作：所有登录用户可访问
- * 写操作（create/update/remove/addDocument/removeDocument）：仅 admin
+ * 写操作（create/update/remove/addDocument/removeDocument/export）：仅 admin
+ * 审计：所有写操作记录到 audit_logs（对应 TODO 2.3：高权限操作留痕，防数据污染）
  */
 @ApiTags('知识库 KnowledgeBase')
 @ApiBearerAuth('access-token')
@@ -38,6 +41,7 @@ export class KnowledgeBaseController {
     private readonly retrievalService: RetrievalService,
     private readonly ragService: RagService,
     private readonly feedbackService: FeedbackService,
+    private readonly auditService: AuditService,
   ) {}
 
   // ========== 读操作 ==========
@@ -91,6 +95,31 @@ export class KnowledgeBaseController {
     @Param('chunkId', ParseUUIDPipe) chunkId: string,
   ) {
     return this.kbService.getChunk(id, chunkId);
+  }
+
+  @ApiOperation({ summary: '导出知识库（json/markdown，admin）' })
+  @Roles(UserRole.ADMIN)
+  @Get(':id/export')
+  async exportKb(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('format') format: 'json' | 'markdown' = 'json',
+    @CurrentUser() user: AuthUser,
+    @Res() res: Response,
+  ): Promise<void> {
+    const fmt = format === 'markdown' ? 'markdown' : 'json';
+    const result = await this.kbService.exportKb(id, fmt);
+    await this.auditService.log({
+      userId: user.id,
+      action: AuditAction.KB_EXPORT,
+      target: { type: 'knowledge_base', id },
+      detail: { format: fmt, filename: result.filename },
+    });
+    res.setHeader('Content-Type', result.mime);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(result.filename)}`,
+    );
+    res.send(result.content);
   }
 
   @ApiOperation({ summary: '生成示例问题（R4，LLM 基于文档列表生成）' })
@@ -165,32 +194,52 @@ export class KnowledgeBaseController {
   @Roles(UserRole.ADMIN)
   @Post()
   @HttpCode(201)
-  create(@Body() dto: CreateKbDto, @CurrentUser() user: AuthUser) {
-    return this.kbService.create({
+  async create(@Body() dto: CreateKbDto, @CurrentUser() user: AuthUser) {
+    const kb = await this.kbService.create({
       name: dto.name,
       description: dto.description,
       categoryId: dto.categoryId,
       chunkStrategy: dto.chunkStrategy,
       createdBy: user.id,
     });
+    await this.auditService.log({
+      userId: user.id,
+      action: AuditAction.KB_CREATE,
+      target: { type: 'knowledge_base', id: kb.id },
+      detail: { name: dto.name },
+    });
+    return kb;
   }
 
   @ApiOperation({ summary: '更新知识库' })
   @Roles(UserRole.ADMIN)
   @Put(':id')
-  update(
+  async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateKbDto,
+    @CurrentUser() user: AuthUser,
   ) {
-    return this.kbService.update(id, dto);
+    const kb = await this.kbService.update(id, dto);
+    await this.auditService.log({
+      userId: user.id,
+      action: AuditAction.KB_UPDATE,
+      target: { type: 'knowledge_base', id },
+      detail: { fields: Object.keys(dto) },
+    });
+    return kb;
   }
 
   @ApiOperation({ summary: '删除知识库（含其全部 chunk）' })
   @Roles(UserRole.ADMIN)
   @Delete(':id')
   @HttpCode(204)
-  async remove(@Param('id', ParseUUIDPipe) id: string) {
+  async remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
     await this.kbService.remove(id);
+    await this.auditService.log({
+      userId: user.id,
+      action: AuditAction.KB_DELETE,
+      target: { type: 'knowledge_base', id },
+    });
   }
 
   @ApiOperation({ summary: '将文档加入知识库（触发切分+embedding 入库）' })
@@ -200,8 +249,15 @@ export class KnowledgeBaseController {
   async addDocument(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: AddDocumentDto,
+    @CurrentUser() user: AuthUser,
   ) {
     const chunkCount = await this.kbService.addDocument(id, dto.documentId);
+    await this.auditService.log({
+      userId: user.id,
+      action: AuditAction.KB_DOCUMENT_ADD,
+      target: { type: 'knowledge_base', id },
+      detail: { documentId: dto.documentId, chunkCount },
+    });
     return { chunkCount };
   }
 
@@ -212,7 +268,14 @@ export class KnowledgeBaseController {
   async removeDocument(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('documentId', ParseUUIDPipe) documentId: string,
+    @CurrentUser() user: AuthUser,
   ) {
     await this.kbService.removeDocument(id, documentId);
+    await this.auditService.log({
+      userId: user.id,
+      action: AuditAction.KB_DOCUMENT_REMOVE,
+      target: { type: 'knowledge_base', id },
+      detail: { documentId },
+    });
   }
 }

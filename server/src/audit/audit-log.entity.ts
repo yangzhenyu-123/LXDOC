@@ -22,6 +22,13 @@ export enum AuditAction {
   USER_UPDATE = 'user_update',
   USER_DELETE = 'user_delete',
   PERMISSION_CHANGE = 'permission_change',
+  // 知识库相关（TODO 2.3：高权限操作留痕，防数据污染）
+  KB_CREATE = 'kb_create',
+  KB_UPDATE = 'kb_update',
+  KB_DELETE = 'kb_delete',
+  KB_DOCUMENT_ADD = 'kb_document_add',
+  KB_DOCUMENT_REMOVE = 'kb_document_remove',
+  KB_EXPORT = 'kb_export',
 }
 
 /**

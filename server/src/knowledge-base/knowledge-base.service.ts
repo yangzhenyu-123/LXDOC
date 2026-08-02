@@ -286,8 +286,100 @@ export class KnowledgeBaseService {
   }
 
   /**
-   * 生成示例问题（R4）
+   * 导出知识库（对应 TODO 2.2.4：生成后的知识库导出功能）
    *
+   * @param kbId 知识库 id
+   * @param format 'json' | 'markdown'
+   * @returns { filename, content, mime }
+   *
+   * - json：KB 元数据 + 文档列表 + 全部 chunk（含 headingPath/chunkType/metadata，不含 embedding）
+   * - markdown：按文档分组，每个文档的 chunk 按 chunkIndex 拼接为单 markdown，文档间用 level1 标题分隔
+   *
+   * 安全：embedding 列不导出（体积大且无业务意义）；用 raw SQL 显式列名避免误带 embedding
+   */
+  async exportKb(
+    kbId: string,
+    format: 'json' | 'markdown',
+  ): Promise<{ filename: string; content: string; mime: string }> {
+    const kb = await this.findOne(kbId);
+    const docs = await this.listDocuments(kbId);
+
+    // raw SQL 取全部 chunk（显式列名，排除 embedding，避免返回大向量）
+    const chunks = await this.entityManager.query(
+      `SELECT id, document_id, chunk_index, content, heading_path, parent_chunk_id, chunk_type, metadata, created_at
+       FROM kb_chunks WHERE kb_id = $1 ORDER BY document_id, chunk_index`,
+      [kbId],
+    );
+
+    const safeName = kb.name.replace(/[^\w\u4e00-\u9fa5.-]/g, '_');
+
+    if (format === 'json') {
+      const payload = {
+        knowledgeBase: {
+          id: kb.id,
+          name: kb.name,
+          description: kb.description,
+          embeddingModel: kb.embeddingModel,
+          embeddingDimensions: kb.embeddingDimensions,
+          chunkStrategy: kb.chunkStrategy,
+          retrievalConfig: kb.retrievalConfig,
+          documentCount: kb.documentCount,
+          chunkCount: kb.chunkCount,
+          createdAt: kb.createdAt,
+        },
+        documents: docs,
+        chunks: chunks.map((c: any) => ({
+          id: c.id,
+          documentId: c.document_id,
+          chunkIndex: c.chunk_index,
+          content: c.content,
+          headingPath: c.heading_path,
+          chunkType: c.chunk_type,
+          metadata: c.metadata,
+          createdAt: c.created_at,
+        })),
+        exportedAt: new Date().toISOString(),
+      };
+      return {
+        filename: `${safeName}.json`,
+        content: JSON.stringify(payload, null, 2),
+        mime: 'application/json; charset=utf-8',
+      };
+    }
+
+    // markdown：按文档分组拼接
+    const docMap = new Map(docs.map((d) => [d.documentId, d]));
+    const byDoc = new Map<string, typeof chunks>();
+    for (const c of chunks) {
+      const arr = byDoc.get(c.document_id) ?? [];
+      arr.push(c);
+      byDoc.set(c.document_id, arr);
+    }
+
+    const parts: string[] = [`# ${kb.name}\n`];
+    if (kb.description) parts.push(`> ${kb.description}\n`);
+    parts.push(`\n> 导出时间：${new Date().toISOString()}  \n> 文档数：${docs.length}  chunk 数：${chunks.length}\n`);
+
+    for (const [docId, docChunks] of byDoc) {
+      const doc = docMap.get(docId);
+      parts.push(`\n---\n\n# 文档：${doc?.title ?? docId}（${doc?.format ?? ''}）\n`);
+      for (const c of docChunks) {
+        if (c.heading_path) {
+          parts.push(`\n## ${c.heading_path}\n`);
+        }
+        parts.push(`\n${c.content}\n`);
+      }
+    }
+
+    return {
+      filename: `${safeName}.md`,
+      content: parts.join('\n'),
+      mime: 'text/markdown; charset=utf-8',
+    };
+  }
+
+  /**
+   * 生成示例问题（R4）
    * 调 LLM 基于文档列表生成 5-10 个测试问题，存到 kb.sample_questions。
    * 前端问答页展示为快捷入口，用户点击直接发起提问。
    *
