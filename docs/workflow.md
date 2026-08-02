@@ -8,6 +8,12 @@
 > - 生产机：无外网（HuggingFace/GitHub/ghcr.io 全部不可达），仅内网 GLM 端点可达
 > - 生产机无外网 → 镜像在开发机构建后 `docker save` → `scp` → `docker load` 传入
 
+> **⚠️ 安全说明**
+> 本文档所有 `<PLACEHOLDER>` 占位符对应的真实值（主机 IP / 密码 / API key / JWT secret）
+> 一律由开发者在本地 `.env` / `server/.env` / shell 环境变量中维护，**不入库、不写入文档**。
+> 推荐用 SSH key 替代 `sshpass` 密码登录；如必须用密码，通过 `sshpass -e` 读环境变量 `SSHPASS`，
+> 避免密码出现在命令行历史与进程列表。
+
 ---
 
 ## 1. 环境信息
@@ -16,7 +22,7 @@
 
 | 项目 | 值 |
 |------|-----|
-| 项目根目录 | `/opt/nexus/html/LXDOC` |
+| 项目根目录 | `<DEV_WORKDIR>`（开发机自定） |
 | 系统 | openEuler 22.03 LTS-SP4 |
 | Docker | 18.09.0（API 最大版本 1.39） |
 | Node | v26.1.0 |
@@ -27,25 +33,40 @@
 
 | 项目 | 值 |
 |------|-----|
-| 地址 | `<PROD_HOST>` |
-| 登录 | `sshpass -p '<PROD_SSH_PASS>' ssh -o StrictHostKeyChecking=accept-new root@<PROD_HOST>` |
-| 项目目录 | `/home/lxdoc` |
+| 地址 | `<PROD_HOST>`（在 shell 环境变量或 `.env` 维护） |
+| 登录 | 推荐 `ssh root@<PROD_HOST>`（SSH key 免密）；临时密码方式见下文 |
+| 项目目录 | `<PROD_WORKDIR>`（生产机自定，如 `/home/lxdoc`） |
 | 系统 | openEuler 24.03 |
 | Docker | 25.0.3 / docker-compose v5.1.1 |
 | 资源 | 384 核 / 1TB RAM / 4.5T 磁盘 |
 | 外网 | 不可达（DNS 解析失败） |
-| 内网 GLM | `http://<LLM_HOST>/v1`（宿主机 `/etc/hosts` 静态解析为 `<LLM_ENDPOINT_IP>`） |
+| 内网 GLM | 端点见 `.env` 的 `LLM_BASE_URL`（host 与 `LLM_ENDPOINT_HOST` 一致，IP 见 `LLM_ENDPOINT_IP`） |
 
 ### 内网 GLM 端点
 
 ```
-URL:   http://<LLM_HOST>/v1
-Key:   <LLM_API_KEY>
-Model: zai-org/GLM-5.2-FP8
+URL:   见 .env 的 LLM_BASE_URL（host 与 LLM_ENDPOINT_HOST 一致）
+Key:   见 .env 的 LLM_API_KEY
+Model: 见 .env 的 LLM_MODEL（默认 zai-org/GLM-5.2-FP8）
 ```
 
-> **容器内 DNS 陷阱**：宿主机 `/etc/hosts` 中的静态解析不会注入 Docker 容器，容器内 `<LLM_HOST>` 会 `EAI_AGAIN`。
-> 已在 `docker-compose.yml` backend 段通过 `extra_hosts` 注入，见 §4。
+> **容器内 DNS 陷阱**：宿主机 `/etc/hosts` 中的静态解析不会注入 Docker 容器，容器内 LLM 端点 host 会 `EAI_AGAIN`。
+> 已在 `docker-compose.yml` backend 段通过 `extra_hosts` 注入（host 与 IP 由 `.env` 的 `LLM_ENDPOINT_HOST` / `LLM_ENDPOINT_IP` 提供），见 §4。
+
+### SSH 访问推荐姿势
+
+```bash
+# 1. 一次性配置 SSH key（推荐）
+ssh-copy-id root@<PROD_HOST>
+# 之后 ssh / rsync / scp 均免密
+
+# 2. 临时密码方式（不写入命令行历史）
+export SSHPASS='<PROD_SSH_PASS>'   # 仅当前 shell 会话有效
+sshpass -e ssh -o StrictHostKeyChecking=accept-new root@<PROD_HOST> 'echo ok'
+# rsync/scp 同样用 sshpass -e
+```
+
+> 下方示例统一用 `ssh root@<PROD_HOST>`（假设已配 SSH key）；如用密码方式，自行在每个 ssh/rsync/scp 前加 `sshpass -e`。
 
 ---
 
@@ -54,12 +75,12 @@ Model: zai-org/GLM-5.2-FP8
 ### 2.1 rsync 同步源码与配置
 
 ```bash
-cd /opt/nexus/html/LXDOC
-sshpass -p '<PROD_SSH_PASS>' rsync -az --delete \
+cd <DEV_WORKDIR>
+rsync -az --delete \
   --exclude '.git' --exclude 'node_modules' --exclude 'dist' --exclude '.env' \
   --exclude '参考项目' --exclude 'backups' --exclude 'uploads' \
   -e 'ssh -o StrictHostKeyChecking=accept-new' \
-  ./ root@<PROD_HOST>:/home/lxdoc/
+  ./ root@<PROD_HOST>:<PROD_WORKDIR>/
 ```
 
 **排除项说明**：
@@ -72,37 +93,37 @@ sshpass -p '<PROD_SSH_PASS>' rsync -az --delete \
 ### 2.2 同步后修正权限
 
 ```bash
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> '
-  chown -R root:root /home/lxdoc
-  git config --global --add safe.directory /home/lxdoc
+ssh root@<PROD_HOST> '
+  chown -R root:root <PROD_WORKDIR>
+  git config --global --add safe.directory <PROD_WORKDIR>
 '
 ```
 
 ### 2.3 生产机 .env 配置
 
-生产机 `/home/lxdoc/.env` 包含所有生产配置，**rsync 不会覆盖**（已排除）。
+生产机 `<PROD_WORKDIR>/.env` 包含所有生产配置，**rsync 不会覆盖**（已排除）。
 关键变量见 `.env.example`，生产环境须设置：
 
 ```env
 # 多 compose 文件叠加
 COMPOSE_FILE=docker-compose.yml:docker-compose.rag.yml
 
-# 数据库（生产密码）
+# 数据库（生产强密码，用 openssl rand -hex 32 生成）
 POSTGRES_PASSWORD=<POSTGRES_PASSWORD>
 
-# 认证
-JWT_SECRET=<强随机值>
-ONLYOFFICE_JWT_SECRET=<强随机值>
+# 认证（生产强随机值，用 openssl rand -hex 32 生成）
+JWT_SECRET=<JWT_SECRET>
+ONLYOFFICE_JWT_SECRET=<ONLYOFFICE_JWT_SECRET>
 ADMIN_EMAIL=admin@lxdoc.local
 ADMIN_PASSWORD=<ADMIN_PASSWORD>
 
-# LLM（内网 GLM）
+# LLM（内网 GLM；host 与下方 LLM_ENDPOINT_HOST 一致）
 LLM_ENABLED=true
 LLM_BASE_URL=http://<LLM_HOST>/v1
 LLM_API_KEY=<LLM_API_KEY>
 LLM_MODEL=zai-org/GLM-5.2-FP8
 
-# Embedding（TEI 容器内通信）
+# Embedding（TEI 容器内通信；用 overlay 时为 compose 服务名）
 LLM_EMBED_BASE_URL=http://tei-embed:80
 LLM_EMBED_MODEL=BAAI/bge-m3
 LLM_EMBED_DIMENSIONS=1024
@@ -112,7 +133,9 @@ LLM_RERANK_BASE_URL=
 LLM_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 LLM_RERANK_CANDIDATE_K=20
 
-# GLM 端点 IP（注入容器 extra_hosts）
+# GLM 端点 DNS 注入（注入容器 extra_hosts）
+# LLM_ENDPOINT_HOST 须与 LLM_BASE_URL 的 host 一致
+LLM_ENDPOINT_HOST=<LLM_HOST>
 LLM_ENDPOINT_IP=<LLM_ENDPOINT_IP>
 ```
 
@@ -125,7 +148,7 @@ LLM_ENDPOINT_IP=<LLM_ENDPOINT_IP>
 ### 3.1 构建镜像
 
 ```bash
-cd /opt/nexus/html/LXDOC
+cd <DEV_WORKDIR>
 
 # backend 镜像（Node 22 + pnpm 11.6）
 DOCKER_API_VERSION=1.39 docker build \
@@ -150,11 +173,11 @@ DOCKER_API_VERSION=1.39 docker save ghcr.io/yangzhenyu-123/lxdoc-backend:latest 
   -o /tmp/opencode/lxdoc-backend.tar
 
 # scp 到生产
-sshpass -p '<PROD_SSH_PASS>' scp -o StrictHostKeyChecking=accept-new \
+scp -o StrictHostKeyChecking=accept-new \
   /tmp/opencode/lxdoc-backend.tar root@<PROD_HOST>:/tmp/
 
 # 生产机加载 + 清理
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> '
+ssh root@<PROD_HOST> '
   docker load -i /tmp/lxdoc-backend.tar
   rm -f /tmp/lxdoc-backend.tar
 '
@@ -167,11 +190,11 @@ rm -f /tmp/opencode/lxdoc-backend.tar
 
 ```bash
 # 查看生产机镜像
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> \
+ssh root@<PROD_HOST> \
   'docker images ghcr.io/yangzhenyu-123/* --format "{{.Repository}}:{{.Tag}} {{.CreatedSince}} {{.Size}}"'
 
 # 查看镜像内文件（验证构建完整性）
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> \
+ssh root@<PROD_HOST> \
   'docker run --rm --entrypoint="" ghcr.io/yangzhenyu-123/lxdoc-backend:latest ls /app/dist/knowledge-base/'
 ```
 
@@ -182,8 +205,8 @@ sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> \
 ### 4.1 全栈启动
 
 ```bash
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> '
-  cd /home/lxdoc
+ssh root@<PROD_HOST> '
+  cd <PROD_WORKDIR>
   docker-compose up -d
   docker-compose ps
 '
@@ -193,26 +216,34 @@ sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> '
 
 ```bash
 # 只重启 backend（如更新了镜像）
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> '
-  cd /home/lxdoc && docker-compose up -d backend
+ssh root@<PROD_HOST> '
+  cd <PROD_WORKDIR> && docker-compose up -d backend
 '
 
 # 只重启 TEI embed（如调整了内存限制）
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> '
-  cd /home/lxdoc && docker-compose up -d tei-embed
+ssh root@<PROD_HOST> '
+  cd <PROD_WORKDIR> && docker-compose up -d tei-embed
 '
 ```
 
 ### 4.3 容器状态检查
 
 ```bash
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> '
-  cd /home/lxdoc
+ssh root@<PROD_HOST> '
+  cd <PROD_WORKDIR>
   docker-compose ps
   echo "---"
   docker stats --no-stream --format "{{.Name}}: MEM {{.MemUsage}} CPU {{.CPUPerc}}"
 '
 ```
+
+> **extra_hosts 注入说明**：`docker-compose.yml` backend 段已加：
+> ```yaml
+> extra_hosts:
+>   - "${LLM_ENDPOINT_HOST:-llm-endpoint}:${LLM_ENDPOINT_IP:-127.0.0.1}"
+> ```
+> `.env` 中设 `LLM_ENDPOINT_HOST=<LLM_HOST>` + `LLM_ENDPOINT_IP=<LLM_ENDPOINT_IP>`，
+> `LLM_ENDPOINT_HOST` 须与 `LLM_BASE_URL` 的 host 一致，否则容器内 fetch LLM_BASE_URL 仍会 DNS 失败。
 
 ---
 
@@ -221,20 +252,22 @@ sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> '
 ### 5.1 登录获取 Token
 
 ```bash
-TOKEN=$(sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> '
+TOKEN=$(ssh root@<PROD_HOST> '
   curl -s -X POST http://localhost:8080/api/auth/login \
     -H "Content-Type: application/json" \
-    -d "{\"email\":\"admin@lxdoc.local\",\"password\":\"<ADMIN_PASSWORD>\"}" \
+    -d "{\"email\":\"admin@lxdoc.local\",\"password\":\"'"$ADMIN_PASSWORD"'\"}" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)[\"accessToken\"])"
 ')
 echo "$TOKEN"
 ```
 
+> `$ADMIN_PASSWORD` 由本地 shell `export ADMIN_PASSWORD=...` 提供，避免硬编码。
+
 ### 5.2 知识库 CRUD
 
 ```bash
 # 创建知识库
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> "
+ssh root@<PROD_HOST> "
   curl -s -X POST http://localhost:8080/api/knowledge-bases \
     -H 'Authorization: Bearer $TOKEN' \
     -H 'Content-Type: application/json' \
@@ -242,7 +275,7 @@ sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> "
 "
 
 # 列表
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> \
+ssh root@<PROD_HOST> \
   "curl -s -H 'Authorization: Bearer $TOKEN' http://localhost:8080/api/knowledge-bases"
 ```
 
@@ -250,7 +283,7 @@ sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> \
 
 ```bash
 KB_ID=<上一步返回的 id>
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> \
+ssh root@<PROD_HOST> \
   "curl -s -H 'Authorization: Bearer $TOKEN' \
    'http://localhost:8080/api/knowledge-bases/$KB_ID/retrieve?query=测试&topK=5'"
 ```
@@ -258,7 +291,7 @@ sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> \
 ### 5.4 RAG 问答（流式）
 
 ```bash
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> "
+ssh root@<PROD_HOST> "
   curl -s -N -X POST http://localhost:8080/api/knowledge-bases/$KB_ID/ask \
     -H 'Authorization: Bearer $TOKEN' \
     -H 'Content-Type: application/json' \
@@ -275,7 +308,7 @@ sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> "
 
 ```bash
 # 点赞 rating=1 / 点踩 rating=-1（点踩须带 reason）
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> "
+ssh root@<PROD_HOST> "
   curl -s -X POST http://localhost:8080/api/knowledge-bases/feedback \
     -H 'Authorization: Bearer $TOKEN' \
     -H 'Content-Type: application/json' \
@@ -311,7 +344,7 @@ mem_limit: 32g
 
 **验证**：
 ```bash
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> '
+ssh root@<PROD_HOST> '
   docker inspect lxdoc-tei-embed --format "RestartCount: {{.RestartCount}}"
   docker logs lxdoc-tei-embed 2>&1 | grep "Ready"
 '
@@ -331,15 +364,16 @@ ADMIN_PASSWORD: ${ADMIN_PASSWORD:?必须在 .env 中设置 ADMIN_PASSWORD}
 
 **现象**：backend 日志 `GLM streamChat 失败：fetch failed`，容器内 `node -e "require('dns').lookup('<LLM_HOST>',...)"` 报 `EAI_AGAIN`。
 
-**原因**：宿主机靠 `/etc/hosts` 静态解析 `<LLM_HOST>`，Docker 容器内 DNS（127.0.0.11）不继承。
+**原因**：宿主机靠 `/etc/hosts` 静态解析 LLM host，Docker 容器内 DNS（127.0.0.11）不继承。
 
 **修复**（已合入 `docker-compose.yml`）：backend 段加：
 ```yaml
 extra_hosts:
-  - "<LLM_HOST>:${LLM_ENDPOINT_IP:-<LLM_ENDPOINT_IP>}"
+  - "${LLM_ENDPOINT_HOST:-llm-endpoint}:${LLM_ENDPOINT_IP:-127.0.0.1}"
 ```
 
-`.env` 中设 `LLM_ENDPOINT_IP=<LLM_ENDPOINT_IP>`（或实际 IP）。
+`.env` 中设 `LLM_ENDPOINT_HOST=<LLM_HOST>` + `LLM_ENDPOINT_IP=<LLM_ENDPOINT_IP>`，
+且 `LLM_ENDPOINT_HOST` 须与 `LLM_BASE_URL` 的 host 一致。
 
 ### 6.4 backend 镜像缺 RAG 路由（404）
 
@@ -402,33 +436,33 @@ docker save <image> -o /tmp/opencode/<name>.tar   # /tmp/opencode 在 root 分�
 ## 8. 快速操作速查
 
 ```bash
-# 一键同步代码
-sshpass -p '<PROD_SSH_PASS>' rsync -az --delete \
+# 一键同步代码（假设已配 SSH key）
+rsync -az --delete \
   --exclude '.git' --exclude 'node_modules' --exclude 'dist' --exclude '.env' \
   --exclude '参考项目' --exclude 'backups' --exclude 'uploads' \
   -e 'ssh -o StrictHostKeyChecking=accept-new' \
-  ./ root@<PROD_HOST>:/home/lxdoc/
+  ./ root@<PROD_HOST>:<PROD_WORKDIR>/
 
 # 一键重建+传输 backend 镜像
 DOCKER_API_VERSION=1.39 docker build -f docker/Dockerfile.backend \
   -t ghcr.io/yangzhenyu-123/lxdoc-backend:latest server/ && \
 DOCKER_API_VERSION=1.39 docker save ghcr.io/yangzhenyu-123/lxdoc-backend:latest \
   -o /tmp/opencode/lxdoc-backend.tar && \
-sshpass -p '<PROD_SSH_PASS>' scp /tmp/opencode/lxdoc-backend.tar root@<PROD_HOST>:/tmp/ && \
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> \
+scp /tmp/opencode/lxdoc-backend.tar root@<PROD_HOST>:/tmp/ && \
+ssh root@<PROD_HOST> \
   'docker load -i /tmp/lxdoc-backend.tar && rm /tmp/lxdoc-backend.tar && \
-   cd /home/lxdoc && docker-compose up -d backend' && \
+   cd <PROD_WORKDIR> && docker-compose up -d backend' && \
 rm /tmp/opencode/lxdoc-backend.tar
 
 # 查看生产机全部容器状态
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> \
-  'cd /home/lxdoc && docker-compose ps'
+ssh root@<PROD_HOST> \
+  'cd <PROD_WORKDIR> && docker-compose ps'
 
 # 查看某服务日志
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> \
+ssh root@<PROD_HOST> \
   'docker logs --tail 20 lxdoc-backend'
 
 # 前端可访问性
-sshpass -p '<PROD_SSH_PASS>' ssh root@<PROD_HOST> \
+ssh root@<PROD_HOST> \
   'curl -s -o /dev/null -w "HTTP %{http_code}\n" http://localhost:8080/'
 ```

@@ -2,7 +2,7 @@
  * 集成测试基础设施验证
  *
  * 确认：
- * - 能连远程 PG（<PROD_HOST>）+ CREATE SCHEMA
+ * - 能连远程 PG（地址见 server/.env 的 DB_HOST）+ CREATE SCHEMA
  * - TypeORM synchronize 在 test schema 建表
  * - kb_chunks 手动建表 + embedding 列 + 索引成功
  * - raw SQL（entityManager.query）能找到 test schema 的表

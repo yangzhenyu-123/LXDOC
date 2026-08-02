@@ -71,7 +71,7 @@ export class User {
   // ============ 用户级 LLM 配置（每人配自己的 baseUrl/apiKey/model） ============
   // 普通用户必须自己配置才能使用 AI；admin 未配时回退系统配置 llm.*
 
-  /** LLM 服务端点（OpenAI 兼容），如 http://<LLM_HOST>/v1/ */
+  /** LLM 服务端点（OpenAI 兼容），如 http://your-llm-host/v1/ */
   @Column({ name: 'llm_base_url', type: 'varchar', length: 500, nullable: true })
   llmBaseUrl: string | null;
 

@@ -163,7 +163,7 @@ onMounted(load);
         <el-form-item label="Base URL（OpenAI 兼容端点）">
           <el-input
             v-model="form.baseUrl"
-            placeholder="如 http://<LLM_HOST>/v1/"
+            placeholder="如 http://your-llm-host/v1/"
             clearable
           />
         </el-form-item>

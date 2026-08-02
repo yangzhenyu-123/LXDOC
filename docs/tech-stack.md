@@ -67,7 +67,7 @@ LXDOC 企业知识库系统使用的全部开源技术，按层次组织。
 
 | 组件 | 用途 |
 |------|------|
-| GLM-5.2（内网 http://<LLM_HOST>/v1） | 对话生成（RAG 问答 + AI 总结 + 示例问题生成） |
+| GLM-5.2（内网，端点见 .env `LLM_BASE_URL`） | 对话生成（RAG 问答 + AI 总结 + 示例问题生成） |
 | BAAI/bge-m3（1024 维） | 嵌入模型（chunk + query 向量化） |
 | BAAI/bge-reranker-v2-m3 | cross-encoder 二次精排（可选） |
 | Text Embeddings Inference (TEI) | HuggingFace 官方推理服务，OpenAI 兼容接口 |

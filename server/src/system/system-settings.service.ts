@@ -62,7 +62,7 @@ export const SETTING_DEFS: readonly SettingDef[] = [
     env: 'LLM_EMBED_BASE_URL',
     type: 'string',
     label: 'Embedding 服务 URL',
-    description: '向量模型推理端点（TEI），如 http://<PROD_HOST>:8081',
+    description: '向量模型推理端点（TEI），如 http://<tei-host>:8081',
     group: 'LLM 大模型',
   },
   {

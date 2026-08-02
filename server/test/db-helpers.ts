@@ -1,7 +1,7 @@
 /**
  * 集成测试 DB helper
  *
- * 在远程 PG（<PROD_HOST>）创建独立测试 schema，实现测试数据隔离：
+ * 在远程 PG（地址见 server/.env 的 DB_HOST）创建独立测试 schema，实现测试数据隔离：
  * - beforeEach: CREATE SCHEMA test_<ts>_<rand>，TypeORM 在该 schema 建表
  * - afterEach: DROP SCHEMA CASCADE，彻底清理
  *

@@ -45,14 +45,14 @@
    ▼
 ┌──────────────────────┐   ┌──────────────────────────────────┐
 │  pgvector (PG 16)    │   │  TEI (bge-m3, 1024 维)          │
-│  kb_chunks.embedding  │   │  http://<PROD_HOST>:8081         │
+│  kb_chunks.embedding  │   │  <LLM_EMBED_BASE_URL>          │
 │  HNSW + GIN trgm 索引 │   │  query embedding + chunk embedding│
 └──────────────────────┘   └──────────────────────────────────┘
    │
    ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  GLM-5.2 (内网)                                              │
-│    http://<LLM_HOST>/v1  chat/completions (stream=true)  │
+│    <LLM_BASE_URL>  chat/completions (stream=true)            │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -71,17 +71,17 @@
 
 ### 部署拓扑
 
-- **TEI + bge-m3**：`<PROD_HOST>:8081`，docker run，`HF_HUB_OFFLINE=1`
-  - 部署目录：`/home/lxdoc-embedding/`
+- **TEI + bge-m3**：docker run，`HF_HUB_OFFLINE=1`，端点地址见 `.env` 的 `LLM_EMBED_BASE_URL`
+  - 部署目录：`<DEPLOY_DIR>/tei-embed/`（生产机自定）
   - 模型：pytorch_model.bin (2.1G) + onnx (2.1G)，从 hf-mirror.com 下载后 scp 传输
-- **PG pgvector**：`<PROD_HOST>:5432`，`pgvector/pgvector:pg16` 镜像
-  - 部署目录：`/home/lxdoc-prod/`，docker-compose
+- **PG pgvector**：`pgvector/pgvector:pg16` 镜像，端点见 `.env` 的 `DB_HOST`
+  - 部署目录：`<DEPLOY_DIR>/`，docker-compose
   - 扩展：vector 0.8.2 + pg_trgm 1.6
 
 ### 关键约束
 
-- <PROD_HOST> 无外网 DNS，镜像和模型均从开发机 save/scp 传输
-- 开发机 <DEV_HOST> 直连远程 PG:5432 + TEI:8081（内网直通）
+- 生产机无外网 DNS，镜像和模型均从开发机 save/scp 传输
+- 开发机经内网直连远程 PG + TEI（具体地址在本地 `server/.env` 维护，不入库）
 
 ## P1 数据层
 
@@ -126,8 +126,8 @@ CREATE INDEX IF NOT EXISTS idx_kb_chunks_kb_doc
 
 `.env`：
 ```
-DB_HOST=<PROD_HOST>
-LLM_EMBED_BASE_URL=http://<PROD_HOST>:8081
+DB_HOST=<PG_HOST>
+LLM_EMBED_BASE_URL=http://<TEI_EMBED_HOST>:<TEI_EMBED_PORT>
 LLM_EMBED_MODEL=BAAI/bge-m3
 LLM_EMBED_DIMENSIONS=1024
 ```
@@ -476,7 +476,7 @@ curl -N -X POST "http://localhost:3000/api/knowledge-bases/:id/ask" \
 ```bash
 # 后端（server/）
 pnpm test                    # L1 单元测试（~5s）
-pnpm test:integration        # L3 集成测试（~13s，需连 <PROD_HOST> PG）
+pnpm test:integration        # L3 集成测试（~13s，需连远程 PG，地址在 server/.env）
 pnpm test:all                # 单元 + 集成
 pnpm test:cov                # 覆盖率
 
@@ -489,7 +489,7 @@ pnpm test:watch              # watch 模式
 
 不用 Testcontainers（开发机 Docker 18.09 太旧 + 镜像下载慢），改用**远程 PG + 独立 schema**：
 
-- `test/db-helpers.ts` 在 <PROD_HOST> PG 创建 `test_<时间戳>_<随机>` schema
+- `test/db-helpers.ts` 在远程 PG（地址见 `server/.env` 的 `DB_HOST`）创建 `test_<时间戳>_<随机>` schema
 - `extra.options = '-c search_path=test_xxx,public'` 让每个连接池连接自动走 test schema
 - test schema 在前保证表名解析优先 test（不污染生产 public），public 在后保证 vector 类型可见
 - `afterEach` 执行 `DROP SCHEMA CASCADE` 彻底清理
@@ -647,15 +647,15 @@ query + chunks → vectorSearch + trgmSearch → RRF 融合 → rerank（可选�
 **部署**（用户手动）：
 
 ```bash
-# 在生产机 <PROD_HOST> 上
+# 在生产机上（用 TEI rerank 镜像）
 docker run -d --name tei-rerank \
   -p 8082:80 \
-  -v /opt/nexus/html/tei-rerank:/data \
+  -v <DEPLOY_DIR>/tei-rerank-models:/data \
   ghcr.io/huggingface/text-embeddings-inference:cpu-1.5 \
   --model-id BAAI/bge-reranker-v2-m3
 
-# 在 server/.env 加
-LLM_RERANK_BASE_URL=http://<PROD_HOST>:8082
+# 在 server/.env 加（地址指向部署 TEI rerank 的主机）
+LLM_RERANK_BASE_URL=http://<TEI_RERANK_HOST>:8082
 LLM_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 LLM_RERANK_CANDIDATE_K=20
 ```
@@ -755,7 +755,7 @@ throw new LlmUnavailableException('所有 LLM Provider 均不可用');
 
 ```env
 # Rerank（TEI /rerank 端点，未配置则跳过 rerank 步骤）
-LLM_RERANK_BASE_URL=http://<PROD_HOST>:8082
+LLM_RERANK_BASE_URL=http://<TEI_RERANK_HOST>:8082
 LLM_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 LLM_RERANK_CANDIDATE_K=20
 ```

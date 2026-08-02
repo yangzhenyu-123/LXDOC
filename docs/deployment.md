@@ -267,10 +267,10 @@ docker ps --filter "name=tei-"
 ```bash
 cat >> .env <<'EOF'
 LLM_ENABLED=true
-LLM_EMBED_BASE_URL=http://<PROD_HOST>:8081
+LLM_EMBED_BASE_URL=http://<TEI_EMBED_HOST>:8081
 LLM_EMBED_MODEL=BAAI/bge-m3
 LLM_EMBED_DIMENSIONS=1024
-LLM_RERANK_BASE_URL=http://<PROD_HOST>:8082
+LLM_RERANK_BASE_URL=http://<TEI_RERANK_HOST>:8082
 LLM_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 EOF
 
@@ -295,7 +295,7 @@ RAG 知识库使用 pgvector 扩展，`docker-compose.yml` 的 postgres 已用 `
 ```bash
 # 1. TEI embedding 就绪检查（overlay 方式）
 docker exec lxdoc-tei-embed wget -qO- localhost/health
-# 备选方式（外部 TEI）：curl http://<PROD_HOST>:8081/health
+# 备选方式（外部 TEI）：curl http://<TEI_EMBED_HOST>:8081/health
 
 # 2. 后端 RAG 配置自检
 curl http://localhost:8080/api/knowledge-base/rag/config -H "Authorization: Bearer <token>"
@@ -458,6 +458,11 @@ LXDOC 上传文档采用「docling 为主 + 本地回退」双层解析，支持
 | `LLM_RERANK_BASE_URL` | （空） | Rerank 服务端点（TEI），留空则跳过 rerank 回退纯 RRF（**不可在线改**，仅 env） |
 | `LLM_RERANK_MODEL` | BAAI/bge-reranker-v2-m3 | Rerank 模型名（**不可在线改**，仅 env） |
 | `LLM_RERANK_CANDIDATE_K` | 20 | Rerank 候选数，RRF 融合后取 top-K 送 rerank（**不可在线改**，仅 env） |
+| `LLM_VISION_MODEL` | （空） | Vision（多模态）模型名，含图片的总结/RAG 问答自动切换；留空禁用 vision，含图文档回退默认模型（图片被忽略 + warn）（**不可在线改**，仅 env） |
+| `LLM_VISION_BASE_URL` | （空） | Vision 端点 baseUrl，留空复用 `LLM_BASE_URL`（同端点不同模型场景）（**不可在线改**，仅 env） |
+| `LLM_VISION_API_KEY` | （空） | Vision 端点 apiKey，留空复用 `LLM_API_KEY`（**不可在线改**，仅 env） |
+| `LLM_VISION_MAX_IMAGES` | 5 | 单次最多投喂图片数（防 token 爆炸）（**不可在线改**，仅 env） |
+| `LLM_VISION_MAX_IMAGE_BYTES` | 2097152 | 单张图片最大字节，超出跳过 + warn（**不可在线改**，仅 env） |
 
 > `enableThinking` **不是**系统配置，仅是用户级字段（`User.llmEnableThinking`）。admin 回退系统配置时该字段硬编码为 `true`；普通用户必须自己配置（或由 admin 代为配置 `actAsUserId` 代理身份）。详见 [llm.md#用户级配置](./llm.md#用户级配置)。
 

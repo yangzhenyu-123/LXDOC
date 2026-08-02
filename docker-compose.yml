@@ -96,6 +96,13 @@ services:
       LLM_TIMEOUT: ${LLM_TIMEOUT:-30000}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
       LLM_SUMMARY_MAX_CHARS: ${LLM_SUMMARY_MAX_CHARS:-80000}
+      # Vision（多模态）模型：含图片的总结/RAG 问答时自动切换
+      # 留空 LLM_VISION_MODEL 则禁用 vision，含图文档回退到默认模型（图片被忽略 + warn）
+      LLM_VISION_MODEL: ${LLM_VISION_MODEL:-}
+      LLM_VISION_BASE_URL: ${LLM_VISION_BASE_URL:-}
+      LLM_VISION_API_KEY: ${LLM_VISION_API_KEY:-}
+      LLM_VISION_MAX_IMAGES: ${LLM_VISION_MAX_IMAGES:-5}
+      LLM_VISION_MAX_IMAGE_BYTES: ${LLM_VISION_MAX_IMAGE_BYTES:-2097152}
       # API 调试文档（Swagger UI）：生产默认关闭，需调试时在 .env 设 ENABLE_API_DOCS=true
       # 开启后访问 http://localhost:8080/api/docs
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
@@ -119,10 +126,12 @@ services:
     volumes:
       # 上传文件目录挂载到宿主机，便于持久化与查看
       - ./uploads:/app/uploads
-    # 内网 DNS 透明：宿主机 /etc/hosts 中静态解析的内网域名注入容器
-    # 否则容器内 Docker DNS（127.0.0.11）无法解析 <LLM_HOST> 等内网服务
+    # LLM 端点内网 DNS 注入：宿主机 /etc/hosts 静态解析的内网域名注入容器，
+    # 否则容器内 Docker DNS（127.0.0.11）无法解析内网服务。
+    # LLM_ENDPOINT_HOST 须与 LLM_BASE_URL 的 host 一致；LLM_ENDPOINT_IP 为该 host 对应的内网 IP。
+    # 二者均在 .env 配置（不入库），未设置时用占位默认值（LLM_ENABLED=false 时不影响）
     extra_hosts:
-      - "<LLM_HOST>:${LLM_ENDPOINT_IP:-<LLM_ENDPOINT_IP>}"
+      - "${LLM_ENDPOINT_HOST:-llm-endpoint}:${LLM_ENDPOINT_IP:-127.0.0.1}"
     # 生产环境经 nginx 反代，不直接暴露
     # ports:
     #   - "3000:3000"
